@@ -5,21 +5,21 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Wi-Fi 广播发现（局域网内找设备） -->
+    <!-- Wi-Fi 广播发现 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
-    <!-- 通话（局域网对讲） -->
+    <!-- 语音对讲 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- 前台服务（常驻 + 通话） -->
+    <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
 
-    <!-- 通知（Android 13+ 需要运行时授权；全屏来电也依赖通知能力） -->
+    <!-- 通知（Android 13+ 运行时授权） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
@@ -45,19 +45,17 @@
             </intent-filter>
         </activity>
 
-        <!-- 常驻服务：设备发现 + 控制信令 -->
         <service
             android:name=".CoreService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- 通话服务：真正采集/播放音频 -->
         <service
             android:name=".AudioCallService"
             android:exported="false"
             android:foregroundServiceType="microphone|phoneCall" />
 
-        <!-- 来电筛选：有卡手机设置为“来电筛选应用”后系统会回调 -->
+        <!-- 关键：注册来电筛选服务（有卡机授权为来电筛选应用后，系统才会回调你的 onScreenCall） -->
         <service
             android:name=".MyCallScreeningService"
             android:exported="true"
