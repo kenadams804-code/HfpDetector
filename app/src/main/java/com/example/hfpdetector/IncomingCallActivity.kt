@@ -2,9 +2,19 @@ package com.example.hfpdetector
 
 import android.Manifest
 import android.app.Activity
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -16,36 +26,132 @@ import kotlin.random.Random
 
 class IncomingCallActivity : Activity() {
 
-    private lateinit var tv: TextView
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var finished = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 锁屏弹出/亮屏（新旧系统兼容）
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+            )
         }
 
-        tv = TextView(this).apply {
-            textSize = 20f
-            setPadding(40, 60, 40, 40)
+        // 尝试请求解锁（不一定每台机型都允许，但可尝试）
+        if (Build.VERSION.SDK_INT >= 26) {
+            val km = getSystemService(KeyguardManager::class.java)
+            km?.requestDismissKeyguard(this, null)
         }
-        val btnAccept = Button(this).apply { text = "接听（局域网对讲）" }
-        val btnDecline = Button(this).apply { text = "拒绝" }
-
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(tv)
-            addView(btnAccept)
-            addView(btnDecline)
-        }
-        setContentView(root)
 
         val invite = CallState.incoming
-        tv.text = if (invite != null) "来电号码：${invite.number}" else "无来电信息"
+        if (invite == null) {
+            finish()
+            return
+        }
 
+        val number = invite.number.ifBlank { "未知号码" }
+
+        // ===== UI =====
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(20), dp(24), dp(20), dp(24))
+        }
+
+        val tvTop = TextView(this).apply {
+            text = "来电"
+            textSize = 28f
+            setTextColor(Color.parseColor("#111111"))
+            typeface = Typeface.DEFAULT_BOLD
+        }
+
+        val tvSub = TextView(this).apply {
+            text = "局域网接听（无卡手机）"
+            textSize = 14f
+            setTextColor(Color.parseColor("#666666"))
+            setPadding(0, dp(8), 0, 0)
+        }
+
+        val centerBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+
+        val tvNumber = TextView(this).apply {
+            text = number
+            textSize = 40f
+            setTextColor(Color.parseColor("#111111"))
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+
+        val tvHint = TextView(this).apply {
+            text = "点“接听”后开始两机免提对讲"
+            textSize = 14f
+            setTextColor(Color.parseColor("#666666"))
+            gravity = Gravity.CENTER
+            setPadding(0, dp(14), 0, 0)
+        }
+
+        centerBox.addView(tvNumber)
+        centerBox.addView(tvHint)
+
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val btnDecline = bigButton(
+            text = "拒绝",
+            bgColor = "#D32F2F"
+        )
+
+        val space = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(16), 1)
+        }
+
+        val btnAccept = bigButton(
+            text = "接听",
+            bgColor = "#2E7D32"
+        )
+
+        bottom.addView(btnDecline, LinearLayout.LayoutParams(0, dp(72), 1f))
+        bottom.addView(space)
+        bottom.addView(btnAccept, LinearLayout.LayoutParams(0, dp(72), 1f))
+
+        root.addView(tvTop)
+        root.addView(tvSub)
+        root.addView(centerBox)
+        root.addView(bottom)
+
+        setContentView(root)
+
+        // ===== Click =====
         btnAccept.setOnClickListener { accept() }
         btnDecline.setOnClickListener { decline() }
+
+        // 自动超时（例如 35 秒没操作就停止响铃并关闭界面）
+        mainHandler.postDelayed({
+            if (!finished) {
+                CoreService.stopRingingNow(this)
+                CallState.incoming = null
+                finish()
+            }
+        }, 35_000)
     }
 
     private fun accept() {
@@ -66,58 +172,3 @@ class IncomingCallActivity : Activity() {
             json = JSONObject()
                 .put("type", "ACCEPT")
                 .put("callId", invite.callId)
-                .put("audioPort", myAudioPort) // 我方音频端口（对方要发给我）
-                .toString()
-        )
-
-        // 2) 立刻停铃（只停铃，不停 CoreService）
-        CoreService.stopRingingNow(this)
-
-        // 3) 启动音频服务（我方开始收发音频）
-        AudioCallService.start(
-            context = this,
-            peerIp = invite.peerIp,
-            peerAudioPort = invite.peerAudioPort, // 对方（发起方）的音频端口
-            myAudioPort = myAudioPort
-        )
-
-        CallState.incoming = null
-        finish()
-    }
-
-    private fun decline() {
-        val invite = CallState.incoming ?: run { finish(); return }
-
-        sendControl(
-            ip = invite.peerIp,
-            port = invite.peerControlPort,
-            json = JSONObject()
-                .put("type", "DECLINE")
-                .put("callId", invite.callId)
-                .toString()
-        )
-
-        CoreService.stopRingingNow(this)
-        CallState.incoming = null
-        finish()
-    }
-
-    private fun sendControl(ip: String, port: Int, json: String) {
-        try {
-            val data = json.toByteArray(Charsets.UTF_8)
-            DatagramSocket().use { s ->
-                val p = DatagramPacket(data, data.size, InetAddress.getByName(ip), port)
-                s.send(p)
-            }
-        } catch (_: Throwable) {}
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 5001) accept()
-    }
-}
