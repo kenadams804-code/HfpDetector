@@ -10,18 +10,25 @@ import android.os.Bundle
 import android.telephony.TelephonyManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.Switch
 import android.widget.TextView
 
 class MainActivity : Activity() {
 
     private lateinit var tv: TextView
+    private lateinit var swSilence: Switch
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         tv = TextView(this).apply {
             textSize = 16f
-            setPadding(40, 40, 40, 40)
+            setPadding(40, 40, 40, 20)
+        }
+
+        swSilence = Switch(this).apply {
+            text = "（仅有卡机）来电尽量静音：主要让无卡机响"
+            isChecked = Prefs.isSilencePstn(this@MainActivity)
         }
 
         val btnPerm = Button(this).apply { text = "申请通知/麦克风权限" }
@@ -31,17 +38,23 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(tv)
+            addView(swSilence)
             addView(btnPerm)
             addView(btnStart)
             addView(btnRole)
         }
         setContentView(root)
 
+        swSilence.setOnCheckedChangeListener { _, isChecked ->
+            Prefs.setSilencePstn(this, isChecked)
+            refreshUi()
+        }
+
         btnPerm.setOnClickListener { requestRuntimePermissions() }
         btnStart.setOnClickListener { CoreService.start(this) }
         btnRole.setOnClickListener { requestCallScreeningRole() }
 
-        // 自动启动常驻服务（你希望“立即触发”，所以默认启动）
+        // 你要求“立即触发”，所以默认启动常驻服务
         CoreService.start(this)
         refreshUi()
     }
@@ -55,18 +68,25 @@ class MainActivity : Activity() {
             rm?.isRoleHeld(RoleManager.ROLE_CALL_SCREENING) == true
         } else false
 
+        val silence = Prefs.isSilencePstn(this)
+
         tv.text = buildString {
             append("LanCall 状态\n")
             append("- 本机是否有 SIM：$hasSimReady\n")
             append("- 是否已持有来电筛选角色：$roleHeld\n")
-            append("\n使用说明（必须看）：\n")
+            append("- 有卡机来电尽量静音：$silence\n")
+
+            append("\n使用说明：\n")
             append("1) 两台手机都安装同一个 APK\n")
             append("2) 两台手机连同一个 Wi-Fi\n")
-            append("3) 两台手机都打开 App，点一次“启动常驻服务”\n")
-            append("4) 仅有卡手机点“设置为来电筛选应用”并在系统弹窗里允许\n")
-            append("5) 外部来电进入有卡机时，无卡机将弹出来电界面显示号码\n")
-            append("6) 无卡机点接听后，开始两机局域网免提对讲\n")
-            append("\n注意：这是两机内网通话，不会把外部来电对方接到无卡机。")
+            append("3) 两台手机都打开 App，并启动常驻服务\n")
+            append("4) 仅有卡手机点“设置为来电筛选应用”并在系统界面允许\n")
+            append("5) 外部来电进入有卡机时：无卡机会弹出来电界面显示号码\n")
+            append("6) 无卡机点接听后：两机开始局域网免提对讲\n")
+
+            append("\n备注：\n")
+            append("- “来电尽量静音”依赖系统对 Call Screening 的支持力度，不同 ROM 可能效果略有差异。\n")
+            append("- 这是两机内网通话，不会把外部来电对方接到无卡机。")
         }
     }
 
