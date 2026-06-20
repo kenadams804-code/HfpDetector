@@ -44,7 +44,6 @@ class CoreService : Service() {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
         }
 
-        /** 仅停止无卡机的响铃/震动与来电通知，不停止常驻服务 */
         fun stopRingingNow(context: Context) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_STOP_RING)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
@@ -57,17 +56,13 @@ class CoreService : Service() {
 
     private var multicastLock: WifiManager.MulticastLock? = null
 
-    // sender 端：发现 receiver 的 IP
     @Volatile private var peerIp: InetAddress? = null
     @Volatile private var peerControlPort: Int = AppConfig.CONTROL_PORT
 
-    // sender 端：当前通话参数
     @Volatile private var myAudioPort: Int = 0
     @Volatile private var callId: String? = null
 
     private var ringtone: Ringtone? = null
-
-    // 震动
     private var vibrator: Vibrator? = null
 
     override fun onCreate() {
@@ -75,21 +70,31 @@ class CoreService : Service() {
         nm = getSystemService(NotificationManager::class.java)
         vibrator = getSystemVibrator()
         createChannels()
-        startForeground(AppConfig.NID_PERSIST, buildPersistNotification("启动中..."))
+
+        // 通知栏：只显示固定信息（不再滚动各种状态）
+        startForeground(AppConfig.NID_PERSIST, buildPersistNotification())
+
+        AppLog.i(this, "CoreService 启动")
         startNetworking()
-        updatePersist("服务已启动")
+
+        // 有卡机：如果启用了手动配对，则直接使用保存的 IP
+        if (isHasSimReady()) {
+            applyManualPairIfEnabled()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                // no-op：保证服务被拉起即可
+                // no-op
             }
             ACTION_STOP_RING -> {
                 stopRinging()
+                AppLog.i(this, "停止响铃/震动")
             }
             ACTION_INCOMING_PSTN -> {
                 val num = intent.getStringExtra("number") ?: "未知号码"
+                AppLog.i(this, "收到系统来电回调：$num")
                 handleIncomingPstn(num)
             }
         }
@@ -101,6 +106,7 @@ class CoreService : Service() {
         try { socket?.close() } catch (_: Throwable) {}
         try { multicastLock?.release() } catch (_: Throwable) {}
         stopRinging()
+        AppLog.i(this, "CoreService 销毁")
         super.onDestroy()
     }
 
@@ -114,7 +120,7 @@ class CoreService : Service() {
     private fun startNetworking() {
         socket = DatagramSocket(AppConfig.CONTROL_PORT).apply { broadcast = true }
 
-        // 接收线程（两端都需要）
+        // 接收线程
         thread(name = "ctrl-recv") {
             val buf = ByteArray(2048)
             while (running) {
@@ -123,19 +129,31 @@ class CoreService : Service() {
                     socket?.receive(p) ?: continue
                     val msg = String(p.data, 0, p.length, Charsets.UTF_8)
                     onControlMessage(msg, p.address)
-                } catch (_: Throwable) {
-                }
+                } catch (_: Throwable) {}
             }
         }
 
         if (!isHasSimReady()) {
-            // 无卡机：receiver 模式 —— 周期广播“我在线”
+            // 无卡机：receiver 广播“我在线”（用于自动发现）
             acquireMulticast()
             startHelloBroadcast()
-            updatePersist("接听端：等待来电触发")
+            AppLog.i(this, "接听端：开始广播 HELLO 供有卡机发现")
         } else {
-            // 有卡机：sender 模式 —— 等待发现 receiver
-            updatePersist("有卡端：等待发现接听端（同一 Wi-Fi）")
+            AppLog.i(this, "有卡端：等待发现接听端（或使用手动配对）")
+        }
+    }
+
+    private fun applyManualPairIfEnabled() {
+        val enabled = Prefs.isManualPairEnabled(this)
+        val ip = Prefs.getPeerIp(this)
+        if (enabled && ip.isNotBlank()) {
+            try {
+                peerIp = InetAddress.getByName(ip)
+                peerControlPort = AppConfig.CONTROL_PORT
+                AppLog.i(this, "有卡端：启用手动配对 peerIp=$ip")
+            } catch (t: Throwable) {
+                AppLog.i(this, "有卡端：手动配对 IP 无效：$ip  err=${t.message}")
+            }
         }
     }
 
@@ -159,8 +177,7 @@ class CoreService : Service() {
                     val data = obj.toString().toByteArray(Charsets.UTF_8)
                     val p = DatagramPacket(data, data.size, bcast, AppConfig.CONTROL_PORT)
                     socket?.send(p)
-                } catch (_: Throwable) {
-                }
+                } catch (_: Throwable) {}
                 Thread.sleep(AppConfig.HELLO_INTERVAL_MS)
             }
         }
@@ -169,15 +186,18 @@ class CoreService : Service() {
     private fun onControlMessage(msg: String, fromIp: InetAddress) {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
         when (obj.optString("type")) {
+
             "HELLO" -> {
-                if (isHasSimReady()) {
+                // 自动发现：只有在“未启用手动配对”时才更新 peer
+                if (isHasSimReady() && !Prefs.isManualPairEnabled(this)) {
                     peerIp = fromIp
                     peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
-                    updatePersist("有卡端：已发现接听端 $fromIp")
+                    AppLog.i(this, "有卡端：自动发现接听端 $fromIp")
                 }
             }
 
             "INVITE" -> {
+                // receiver 收到邀请 -> 弹无卡机来电界面
                 if (!isHasSimReady()) {
                     val number = obj.optString("number", "未知号码")
                     val cid = obj.optString("callId", UUID.randomUUID().toString())
@@ -192,36 +212,38 @@ class CoreService : Service() {
                         peerAudioPort = senderAudioPort
                     )
 
+                    AppLog.i(this, "接听端：收到 INVITE 号码=$number from=$fromIp")
                     stopRinging()
                     ringAndShowIncoming(number)
                 }
             }
 
             "ACCEPT" -> {
+                // sender 收到对方接受 -> 开始音频
                 if (isHasSimReady()) {
                     val cid = obj.optString("callId", "")
                     val receiverAudioPort = obj.optInt("audioPort", 0)
                     val receiverIp = fromIp.hostAddress
 
                     if (cid.isNotBlank() && cid == callId && receiverAudioPort != 0 && myAudioPort != 0) {
+                        AppLog.i(this, "有卡端：对方接听，开始对讲 receiver=$receiverIp:$receiverAudioPort")
                         AudioCallService.start(
                             context = this,
                             peerIp = receiverIp,
                             peerAudioPort = receiverAudioPort,
                             myAudioPort = myAudioPort
                         )
-                        updatePersist("有卡端：通话中（对讲）")
                     }
                 }
             }
 
             "DECLINE" -> {
-                if (isHasSimReady()) updatePersist("有卡端：对方拒绝")
+                if (isHasSimReady()) AppLog.i(this, "有卡端：对方拒绝")
             }
 
             "HANGUP" -> {
                 AudioCallService.stop(this)
-                updatePersist(if (isHasSimReady()) "有卡端：已挂断" else "接听端：已挂断")
+                AppLog.i(this, "通话挂断")
             }
         }
     }
@@ -229,9 +251,12 @@ class CoreService : Service() {
     private fun handleIncomingPstn(number: String) {
         if (!isHasSimReady()) return
 
+        // 每次来电触发时，再读取一次“手动配对”配置（避免你在设置页改了但服务没重启）
+        applyManualPairIfEnabled()
+
         val peer = peerIp
         if (peer == null) {
-            updatePersist("有卡端：未发现接听端（确认两机同 Wi-Fi，且无卡机已点启动服务）")
+            AppLog.i(this, "有卡端：未找到接听端（请确保无卡机已启动服务，或手动配对 IP）")
             return
         }
 
@@ -250,7 +275,7 @@ class CoreService : Service() {
         val p = DatagramPacket(data, data.size, peer, peerControlPort)
         socket?.send(p)
 
-        updatePersist("有卡端：已推送来电到接听端（号码：$number）")
+        AppLog.i(this, "有卡端：已发送 INVITE 到接听端 ${peer.hostAddress}")
     }
 
     private fun ringAndShowIncoming(number: String) {
@@ -262,10 +287,11 @@ class CoreService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // 来电通知（必须保留：用于全屏弹窗）
         val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentTitle("来电")
-            .setContentText("号码：$number")
+            .setContentText(number)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setFullScreenIntent(pi, true)
@@ -273,7 +299,6 @@ class CoreService : Service() {
             .build()
 
         nm.notify(AppConfig.NID_INCOMING, n)
-
         startRinging()
     }
 
@@ -322,8 +347,7 @@ class CoreService : Service() {
         try {
             val v = vibrator ?: return
             if (!v.hasVibrator()) return
-
-            val pattern = longArrayOf(0, 500, 400, 500, 1200) // 震动/停/震动/停...
+            val pattern = longArrayOf(0, 450, 350, 450, 1100)
             if (Build.VERSION.SDK_INT >= 26) {
                 v.vibrate(VibrationEffect.createWaveform(pattern, 0))
             } else {
@@ -337,11 +361,7 @@ class CoreService : Service() {
         try { vibrator?.cancel() } catch (_: Throwable) {}
     }
 
-    private fun updatePersist(text: String) {
-        nm.notify(AppConfig.NID_PERSIST, buildPersistNotification(text))
-    }
-
-    private fun buildPersistNotification(text: String): Notification {
+    private fun buildPersistNotification(): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -349,8 +369,8 @@ class CoreService : Service() {
 
         return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("LanCall 常驻服务")
-            .setContentText(text)
+            .setContentTitle("LanCall")
+            .setContentText("正在后台运行")
             .setOngoing(true)
             .setContentIntent(open)
             .build()
@@ -358,9 +378,12 @@ class CoreService : Service() {
 
     private fun createChannels() {
         if (Build.VERSION.SDK_INT < 26) return
+
+        // 常驻通知：低打扰
         nm.createNotificationChannel(
             NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
         )
+        // 来电：高优先级
         nm.createNotificationChannel(
             NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
         )
