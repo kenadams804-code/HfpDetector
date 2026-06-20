@@ -1,2 +1,3 @@
-#!/usr/bin/env bash
-echo "启动云端编译..."
+#!/usr/bin/env sh
+# 官方标准 Linux 启动器
+exec "./gradlew.bat" "$@"
