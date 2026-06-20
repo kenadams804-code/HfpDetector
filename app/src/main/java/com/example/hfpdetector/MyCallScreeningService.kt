@@ -12,6 +12,9 @@ class MyCallScreeningService : CallScreeningService() {
             "未知号码"
         }
 
+        // 记录一份“最近来电号码/时间”，用于界面显示（更像应用，不用看 true/false）
+        Prefs.setLastIncoming(this, number)
+
         // 触发：把号码推给无卡机
         CoreService.notifyIncomingPstn(this, number)
 
@@ -23,7 +26,7 @@ class MyCallScreeningService : CallScreeningService() {
             .setRejectCall(false)
             .setSkipCallLog(false)
             .setSkipNotification(false)
-            .setSilenceCall(silence) // 这里由开关决定
+            .setSilenceCall(silence) // 开关控制：有卡机正常响铃/尽量静音
             .build()
 
         respondToCall(callDetails, response)
