@@ -1,73 +1,38 @@
-name: Build Android APK (Pure Auto)
+name: Build Android APK
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
 
-    # 【降维打击命令】：在开工前，通过命令在云端极其干净地、从零开始捏出一个绝对契合当前高版本编译环境的完美项目骨架，并把我们的蓝牙检测核心代码精准塞进去！
-    - name: Auto Generate Pure Project Skeleton
-      run: |
-        echo "正在一键开启全自动纯净生产线..."
-        # 1. 备份我们的核心逻辑代码和权限文件
-        mkdir -p /tmp/backup_core
-        cp app/src/main/java/com/example/hfpdetector/MainActivity.kt /tmp/backup_core/ || true
-        cp app/src/main/AndroidManifest.xml /tmp/backup_core/ || true
-        
-        # 2. 彻底清洗并格式化当前所有容易跟云端打架的旧配置和旧文件
-        rm -rf app/ build.gradle settings.gradle gradlew gradlew.bat gradle/ .gradle/
-        
-        # 3. 利用安卓原生底层无冲突工具，就地瞬间生成一个百分之百合规的纯净高版本基础骨架
-        mkdir -p app/src/main/java/com/example/hfpdetector
-        
-        # 4. 在线重写最符合高版本编译器心意、绝不会报错打架的极简打包规则
-        cat << 'EOF' > settings.gradle
-        pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-        dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
-        rootProject.name = "HfpDetector"
-        include ':app'
-        EOF
-        
-        cat << 'EOF' > build.gradle
-        plugins { id 'com.android.application' version '8.2.0' apply false; id 'org.jetbrains.kotlin.android' version '1.9.0' apply false }
-        EOF
-        
-        cat << 'EOF' > app/build.gradle
-        plugins { id 'com.android.application'; id 'org.jetbrains.kotlin.android' }
-        android { namespace 'com.example.hfpdetector'; compileSdk 34; defaultConfig { applicationId "com.example.hfpdetector"; minSdk 26; targetSdk 34; versionCode 1; versionName "1.0" } }
-        EOF
-        
-        # 5. 把我们真正的核心蓝牙逻辑代码和权限文件原封不动地请回到这个完美骨架中
-        cp /tmp/backup_core/MainActivity.kt app/src/main/java/com/example/hfpdetector/
-        cp /tmp/backup_core/AndroidManifest.xml app/src/main/
-        
-        # 6. 让云端系统自己为这个纯净的新项目盖章发钥匙
-        gradle wrapper --gradle-version 8.4
-        chmod +x gradlew
-        echo "🎉 完美无冲突生产线重组完毕！"
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
 
-    # 执行最终的正统编译（这次它面对的是自己亲手捏出来的完美骨架，绝对不会打架）
-    - name: Build with Gradle
-      run: ./gradlew assembleDebug --no-daemon
+      - name: Print Gradle version (from wrapper)
+        run: ./gradlew --version
 
-    # 封装打包产物上传
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: hfp-detector-apk
-        path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Build Debug APK
+        run: ./gradlew clean assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
