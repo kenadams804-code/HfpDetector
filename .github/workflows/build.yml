@@ -53,7 +53,7 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          /tmp/gradle/bin/gradle clean assembleDebug --stacktrace --no-daemon
+          /tmp/gradle/bin/gradle clean assembleDebug --stacktrace --no-daemon --info --console=plain
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
