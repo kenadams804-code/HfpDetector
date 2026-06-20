@@ -28,6 +28,7 @@ class CoreService : Service() {
     companion object {
         private const val ACTION_START = "CoreService.START"
         private const val ACTION_INCOMING_PSTN = "CoreService.INCOMING_PSTN"
+        private const val ACTION_STOP_RING = "CoreService.STOP_RING"
 
         fun start(context: Context) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_START)
@@ -37,6 +38,12 @@ class CoreService : Service() {
         fun notifyIncomingPstn(context: Context, number: String) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_INCOMING_PSTN)
             i.putExtra("number", number)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
+        }
+
+        /** 仅停止无卡机的响铃与来电通知，不停止常驻服务 */
+        fun stopRingingNow(context: Context) {
+            val i = Intent(context, CoreService::class.java).setAction(ACTION_STOP_RING)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
         }
     }
@@ -68,6 +75,12 @@ class CoreService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_START -> {
+                // no-op：保证服务被拉起即可
+            }
+            ACTION_STOP_RING -> {
+                stopRinging()
+            }
             ACTION_INCOMING_PSTN -> {
                 val num = intent.getStringExtra("number") ?: "未知号码"
                 handleIncomingPstn(num)
@@ -131,7 +144,8 @@ class CoreService : Service() {
         thread(name = "hello-bcast") {
             while (running) {
                 try {
-                    val bcast = NetUtils.getBroadcastAddress(this@CoreService) ?: InetAddress.getByName("255.255.255.255")
+                    val bcast = NetUtils.getBroadcastAddress(this@CoreService)
+                        ?: InetAddress.getByName("255.255.255.255")
                     val obj = JSONObject()
                         .put("type", "HELLO")
                         .put("controlPort", AppConfig.CONTROL_PORT)
@@ -156,6 +170,7 @@ class CoreService : Service() {
                     updatePersist("有卡端：已发现接听端 $fromIp")
                 }
             }
+
             "INVITE" -> {
                 // 仅 receiver 处理来电邀请
                 if (!isHasSimReady()) {
@@ -172,9 +187,12 @@ class CoreService : Service() {
                         peerAudioPort = senderAudioPort
                     )
 
+                    // 新来电前先停掉旧响铃/旧通知（避免叠加）
+                    stopRinging()
                     ringAndShowIncoming(number)
                 }
             }
+
             "ACCEPT" -> {
                 // 仅 sender 收到：对方接受，开始通话
                 if (isHasSimReady()) {
@@ -193,11 +211,13 @@ class CoreService : Service() {
                     }
                 }
             }
+
             "DECLINE" -> {
                 if (isHasSimReady()) {
                     updatePersist("有卡端：对方拒绝")
                 }
             }
+
             "HANGUP" -> {
                 AudioCallService.stop(this)
                 updatePersist(if (isHasSimReady()) "有卡端：已挂断" else "接听端：已挂断")
@@ -217,14 +237,13 @@ class CoreService : Service() {
 
         val cid = UUID.randomUUID().toString()
         callId = cid
-
         myAudioPort = Random.nextInt(45000, 45999)
 
         val obj = JSONObject()
             .put("type", "INVITE")
             .put("callId", cid)
             .put("number", number)
-            .put("audioPort", myAudioPort)           // 我方音频端口（对方要发给我）
+            .put("audioPort", myAudioPort) // 我方音频端口（对方要发给我）
             .put("controlPort", AppConfig.CONTROL_PORT)
 
         val data = obj.toString().toByteArray(Charsets.UTF_8)
@@ -235,7 +254,7 @@ class CoreService : Service() {
     }
 
     private fun ringAndShowIncoming(number: String) {
-        // 1) 全屏来电通知（点击接听进入 IncomingCallActivity）
+        // 1) 全屏来电通知（点击进入 IncomingCallActivity）
         val fullScreenIntent = Intent(this, IncomingCallActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
@@ -302,16 +321,4 @@ class CoreService : Service() {
     }
 
     private fun createChannels() {
-        if (Build.VERSION.SDK_INT < 26) return
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
-        )
-    }
-
-    fun stopIncomingUiAndRingtone() {
-        stopRinging()
-    }
-}
+        if 
