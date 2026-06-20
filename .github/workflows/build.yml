@@ -21,23 +21,6 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    # 【修复核心】：换成国内腾讯云/阿里云公开托管的、更具网络兼容性的通用备份地址
-    - name: Automatically Download Gradle Wrapper Jar
-      run: |
-        mkdir -p gradle/wrapper
-        if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-          echo "正在通过高兼容网络节点补齐钥匙文件..."
-          curl -Lo gradle/wrapper/gradle-wrapper.jar https://tencent.com || curl -Lo gradle/wrapper/gradle-wrapper.jar https://maven.org
-        fi
-
-    # 【防御性兜底】：如果上面网络依然受限，由打包脚本就地直接伪造生成一个格式正确的 jar 空壳，骗过编译器的第一关初始化
-    - name: Backup Jar Strategy
-      run: |
-        if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-          echo "触发本地应急预案，正在自动生成结构钥匙..."
-          echo "PK" > gradle/wrapper/gradle-wrapper.jar
-        fi
-
     - name: Grant execute permission for gradlew
       run: |
         if [ -f gradlew ]; then
