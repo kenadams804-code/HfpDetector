@@ -22,7 +22,10 @@ class MainActivity : Activity() {
     private lateinit var tvTitle: TextView
     private lateinit var tvSummary: TextView
     private lateinit var tvLast: TextView
+
+    private lateinit var swBoot: Switch
     private lateinit var swSilence: Switch
+
     private lateinit var btnPerm: Button
     private lateinit var btnStart: Button
     private lateinit var btnRole: Button
@@ -46,8 +49,14 @@ class MainActivity : Activity() {
             setPadding(40, 10, 40, 20)
         }
 
+        swBoot = Switch(this).apply {
+            text = "开机自启动常驻服务（重启后自动可用）"
+            isChecked = Prefs.isAutoStartOnBoot(this@MainActivity)
+        }
+
         swSilence = Switch(this).apply {
             text = "有卡手机来电尽量静音（主要让无卡手机响）"
+            isChecked = Prefs.isSilencePstn(this@MainActivity)
         }
 
         btnPerm = Button(this).apply { text = "申请权限（通知/麦克风）" }
@@ -59,6 +68,7 @@ class MainActivity : Activity() {
             addView(tvTitle)
             addView(tvSummary)
             addView(tvLast)
+            addView(swBoot)
             addView(swSilence)
             addView(btnPerm)
             addView(btnStart)
@@ -66,14 +76,19 @@ class MainActivity : Activity() {
         }
         setContentView(root)
 
+        swBoot.setOnCheckedChangeListener { _, checked ->
+            Prefs.setAutoStartOnBoot(this, checked)
+            refreshUi()
+        }
+
+        swSilence.setOnCheckedChangeListener { _, checked ->
+            Prefs.setSilencePstn(this, checked)
+            refreshUi()
+        }
+
         btnPerm.setOnClickListener { requestRuntimePermissions() }
         btnStart.setOnClickListener { CoreService.start(this) }
         btnRole.setOnClickListener { requestCallScreeningRole() }
-
-        swSilence.setOnCheckedChangeListener { _, isChecked ->
-            Prefs.setSilencePstn(this, isChecked)
-            refreshUi()
-        }
 
         // 你要求“立即触发”，默认启动常驻服务
         CoreService.start(this)
@@ -89,18 +104,18 @@ class MainActivity : Activity() {
             rm?.isRoleHeld(RoleManager.ROLE_CALL_SCREENING) == true
         } else false
 
-        val syncText = if (hasSimReady) {
-            if (roleHeld) "来电号码同步：已开启" else "来电号码同步：未开启（点下面按钮开启）"
-        } else {
-            "本机为无卡手机：只负责接听与响铃"
-        }
-
-        // 无卡机不需要“静音有卡机来电”这个开关
+        // 无卡机不需要“静音有卡机来电”
         swSilence.visibility = if (hasSimReady) View.VISIBLE else View.GONE
         swSilence.isChecked = Prefs.isSilencePstn(this)
 
         // 无卡机不需要申请“来电筛选角色”
         btnRole.visibility = if (hasSimReady) View.VISIBLE else View.GONE
+
+        val syncText = if (hasSimReady) {
+            if (roleHeld) "来电号码同步：已开启" else "来电号码同步：未开启（点下面按钮开启）"
+        } else {
+            "本机为无卡手机：只负责接听与响铃"
+        }
 
         tvSummary.text = buildString {
             append(syncText)
@@ -109,10 +124,13 @@ class MainActivity : Activity() {
             append("\n2）两台手机都打开 App，点一次“启动常驻服务”")
             if (hasSimReady) {
                 append("\n3）在有卡手机上点“开启来电号码同步（系统授权）”，按系统提示允许")
-                append("\n4）外部来电时：无卡手机会弹出来电界面显示号码，点接听即可内网对讲")
+                append("\n4）外部来电时：无卡手机会弹出来电界面显示号码，滑动接听即可内网对讲")
             } else {
                 append("\n3）等待有卡手机触发来电后，本机会弹出接听界面")
             }
+            append("\n\n开机自启说明：")
+            append("\n- 打开“开机自启动常驻服务”后，重启手机会自动启动服务。")
+            append("\n- 部分系统仍需在系统设置里允许自启动/后台运行/忽略电池优化。")
         }
 
         val lastNumber = Prefs.getLastNumber(this)
