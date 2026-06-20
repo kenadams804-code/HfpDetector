@@ -19,13 +19,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Show Kotlin files (for debugging)
+        run: |
+          echo "---- Kotlin files ----"
+          find app/src -name "*.kt" -print || true
+          echo "---- Search compose keywords ----"
+          grep -RIn "androidx.compose\|Modifier\|padding(" app/src || true
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # 安装 Android SDK（关键：否则经常会报 “SDK location not found”）
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
@@ -37,7 +43,6 @@ jobs:
             "build-tools;${ANDROID_BUILD_TOOLS}"
           yes | sdkmanager --licenses
 
-      # 给 Android Gradle Plugin 一个明确的 SDK 路径
       - name: Write local.properties (sdk.dir)
         run: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
@@ -51,9 +56,22 @@ jobs:
           mv gradle-${GRADLE_VERSION} /tmp/gradle
           /tmp/gradle/bin/gradle --version
 
-      - name: Build Debug APK
+      - name: Build Debug APK (print real Kotlin error lines)
+        shell: bash
         run: |
-          /tmp/gradle/bin/gradle clean assembleDebug --stacktrace --no-daemon --info --console=plain
+          set +e
+          /tmp/gradle/bin/gradle clean assembleDebug --no-daemon --stacktrace --console=plain | tee gradle.log
+          status=${PIPESTATUS[0]}
+
+          echo ""
+          echo "================ Kotlin error lines (e:) ================"
+          grep -n "^e: " gradle.log || true
+
+          echo ""
+          echo "================ Manifest merger lines ================"
+          grep -n "Manifest merger failed" gradle.log || true
+
+          exit $status
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
