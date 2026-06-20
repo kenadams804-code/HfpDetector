@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     env:
       GRADLE_VERSION: "8.7"
       ANDROID_PLATFORM: "34"
@@ -18,13 +19,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Show Kotlin files (for debugging)
-        run: |
-          echo "---- Kotlin files ----"
-          find app/src -name "*.kt" -print || true
-          echo "---- Search compose keywords ----"
-          grep -RIn "androidx.compose\|Modifier\|padding(" app/src || true
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -51,16 +45,23 @@ jobs:
       - name: Download Gradle (fixed version, no wrapper)
         run: |
           set -e
-          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
+          curl -L -o gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
           unzip -q gradle.zip
-          mv gradle-${GRADLE_VERSION} /tmp/gradle
+          mv "gradle-${GRADLE_VERSION}" /tmp/gradle
           /tmp/gradle/bin/gradle --version
 
-           - name: Build Debug APK (extract error lines)
+      - name: Build Debug APK (extract error lines)
         shell: bash
         run: |
           set +e
-          /tmp/gradle/bin/gradle clean assembleDebug --no-daemon --stacktrace --console=plain | tee gradle.log
+
+          echo "---- Kotlin files ----"
+          find app/src -name "*.kt" -print || true
+          echo "---- Search compose keywords ----"
+          grep -RIn "androidx.compose\|Modifier\|padding(" app/src || true
+
+          echo "---- Build start ----"
+          /tmp/gradle/bin/gradle clean assembleDebug --no-daemon --stacktrace --console=plain 2>&1 | tee gradle.log
           status=${PIPESTATUS[0]}
 
           echo ""
@@ -69,15 +70,23 @@ jobs:
 
           echo ""
           echo "==================== Other error keywords ===================="
-          grep -n "Unresolved reference\|error:\|Compilation error\|FAILURE: Build failed" gradle.log || true
+          grep -n "Unresolved reference\|error:\|Compilation error\|Manifest merger failed\|FAILURE: Build failed" gradle.log || true
 
           echo ""
-          echo "==================== Tail (last 120 lines) ===================="
-          tail -n 120 gradle.log || true
+          echo "==================== Tail (last 160 lines) ===================="
+          tail -n 160 gradle.log || true
 
           exit $status
 
-      - name: Upload APK Artifact
+      - name: Upload gradle log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-log
+          path: gradle.log
+
+      - name: Upload APK Artifact (only if build succeeded)
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
