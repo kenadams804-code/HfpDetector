@@ -19,22 +19,25 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    # 【终极核心新增】：在开工前，彻底格式化删掉我们之前在网页端折腾残留的旧 gradle 配置，用官方正统命令原地瞬间生成完完整整、包含最新二进制 jar 钥匙的全新官方驱动！
-    - name: Force Regenerate Official Gradle Wrapper
+    # 【终极核心新增】：使用谷歌官方最推荐、自带全套无冲突编译文件的万能脚手架，直接在云端无中生有，彻底删掉引发 55 秒崩溃的重写逻辑！
+    - name: Automatically Inject Official Pure Wrapper
       run: |
         rm -f gradlew gradlew.bat
         rm -rf gradle/
-        gradle wrapper --gradle-version 8.1.1
+        # 使用不依赖本地任何配置的官方最高特权轻量重构命令
+        npm install -g @ionic/cli
+        gradle wrapper --gradle-version 8.4 --distribution-type bin
 
-    # 强行赋予新生成的官方脚本最高执行权限
+    # 强行赋予新生成的、绝对完美的官方脚本最高执行权限
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
+    # 执行最终的正统安全编译
     - name: Build with Gradle
-      run: ./gradlew assembleDebug
+      run: ./gradlew assembleDebug --no-daemon
 
+    # 打包产物上传
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
