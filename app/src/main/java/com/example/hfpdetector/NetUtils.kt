@@ -19,8 +19,15 @@ object NetUtils {
         return InetAddress.getByAddress(quads)
     }
 
-    fun intToIp(i: Int): String {
-        val bb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(i)
-        return InetAddress.getByAddress(bb.array()).hostAddress ?: "0.0.0.0"
+    fun getLocalWifiIp(context: Context): String {
+        return try {
+            val wifi = context.applicationContext.getSystemService(WifiManager::class.java) ?: return ""
+            val ipInt = wifi.connectionInfo?.ipAddress ?: 0
+            if (ipInt == 0) return ""
+            val bb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(ipInt)
+            InetAddress.getByAddress(bb.array()).hostAddress ?: ""
+        } catch (_: Throwable) {
+            ""
+        }
     }
 }
