@@ -1,119 +1,112 @@
 package com.example.hfpdetector
 
 import android.Manifest
+import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothProfile
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
-import android.widget.Button
+import android.os.Handler
+import android.os.Looper
 import android.widget.TextView
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
 
-    private val TAG = "HfpDetector"
-    
-    // 16 代表系统隐藏的 BluetoothProfile.HEADSET_CLIENT (免提端/耳机角色)
-    private val HEADSET_CLIENT_PROFILE_ID = 16 
-
-    private lateinit var resultTextView: TextView
-    private lateinit var detectButton: Button
-    private var bluetoothAdapter: BluetoothAdapter? = null
+    private lateinit var tv: TextView
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var finished = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // 使用纯代码构建简单的测试界面
-        val linearLayout = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            padding = 60
-        }
-        detectButton = Button(this).apply { text = "开始检测 HFP 角色" }
-        resultTextView = TextView(this).apply { 
-            text = "点击上方按钮开始检测当前手机底层..."
-            textSize = 18f
-        }
-        linearLayout.addView(detectButton)
-        linearLayout.addView(resultTextView)
-        setContentView(linearLayout)
 
-        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter()
-
-        detectButton.setOnClickListener {
-            checkPermissionsAndDetect()
+        tv = TextView(this).apply {
+            textSize = 16f
+            setPadding(48, 48, 48, 48)
+            text = "HfpDetector 检测中..."
         }
+        setContentView(tv)
+
+        ensurePermissionThenCheck()
     }
 
-    private fun checkPermissionsAndDetect() {
-        if (bluetoothAdapter == null) {
-            updateResult("失败: 该设备不支持蓝牙硬件")
-            return
-        }
-
-        if (!bluetoothAdapter!!.isEnabled) {
-            updateResult("提示: 请先开启手机系统的蓝牙开关")
-            return
-        }
-
-        // 针对 Android 12 及以上系统的蓝牙运行时权限检查
+    private fun ensurePermissionThenCheck() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 101)
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 1001)
                 return
             }
         }
-
-        startProfileDetection()
+        runCheck()
     }
 
-    private fun startProfileDetection() {
-        updateResult("正在向系统请求 HFP Client 代理服务...\n(Profile ID: 16)")
-
-        val success = bluetoothAdapter?.getProfileProxy(this, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                if (profile == HEADSET_CLIENT_PROFILE_ID) {
-                    Log.d(TAG, "成功连接到 HFP Client 代理服务")
-                    
-                    // 获取对端代理类的实际名称
-                    val className = proxy.javaClass.name
-                    
-                    runOnUiThread {
-                        updateResult(
-                            "🎉 恭喜！当前手机【支持】伪装成蓝牙耳机。\n\n" +
-                            "底层类名: $className\n" +
-                            "检测结果: 允许开发方案 A。"
-                        )
-                    }
-                    
-                    // 及时关闭代理释放资源
-                    bluetoothAdapter?.closeProfileProxy(HEADSET_CLIENT_PROFILE_ID, proxy)
-                }
-            }
-
-            override fun onServiceDisconnected(profile: Int) {
-                Log.d(TAG, "HFP Client 服务已断开")
-            }
-        }, HEADSET_CLIENT_PROFILE_ID) ?: false
-
-        if (!success) {
-            updateResult("❌ 检测失败:\n系统直接拒绝了 ID 16 的请求。\n这说明厂商在 ROM 固件中阉割了该功能，不支持伪装成耳机。")
-        }
-    }
-
-    private fun updateResult(text: String) {
-        resultTextView.text = text
-        Log.i(TAG, text)
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 101 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            startProfileDetection()
-        } else {
-            updateResult("失败: 缺少蓝牙连接权限，无法完成检测")
+        if (requestCode == 1001) {
+            runCheck()
         }
+    }
+
+    private fun runCheck() {
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        if (adapter == null) {
+            tv.text = "❌ 本机不支持蓝牙（BluetoothAdapter=null）"
+            return
+        }
+        if (!adapter.isEnabled) {
+            tv.text = "⚠️ 蓝牙未开启，请先打开蓝牙后重试"
+            return
+        }
+
+        // 额外检测：有些 ROM 会直接删除这个类
+        val classExists = try {
+            Class.forName("android.bluetooth.BluetoothHeadsetClient")
+            true
+        } catch (_: Throwable) {
+            false
+        }
+
+        tv.text = "检测中...\n- BluetoothHeadsetClient 类存在：$classExists\n- 正在尝试连接 HEADSET_CLIENT(16) 服务..."
+
+        val ok = try {
+            adapter.getProfileProxy(
+                this,
+                object : BluetoothProfile.ServiceListener {
+                    override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                        if (profile == BluetoothProfile.HEADSET_CLIENT) {
+                            finished = true
+                            tv.text =
+                                "🎉 恭喜支持 HFP Headset Client（可以走方案A）\nprofile=$profile\nproxy=${proxy.javaClass.name}"
+                            adapter.closeProfileProxy(profile, proxy)
+                        }
+                    }
+
+                    override fun onServiceDisconnected(profile: Int) {
+                        // ignore
+                    }
+                },
+                BluetoothProfile.HEADSET_CLIENT
+            )
+        } catch (t: Throwable) {
+            tv.text = "❌ 调用 getProfileProxy 失败：${t.javaClass.simpleName}\n${t.message}"
+            return
+        }
+
+        if (!ok) {
+            tv.text = "❌ 厂商阉割/系统不支持 HEADSET_CLIENT（getProfileProxy 返回 false）\n（建议走方案B：局域网 VoIP）"
+            return
+        }
+
+        // 超时：请求成功但迟迟不回调，也判定不支持/被阉割
+        mainHandler.postDelayed({
+            if (!finished) {
+                tv.text =
+                    "❌ 疑似不支持/被阉割：请求 profile proxy 成功但 4 秒内未回调 onServiceConnected\n（建议走方案B：局域网 VoIP）"
+            }
+        }, 4000)
     }
 }
