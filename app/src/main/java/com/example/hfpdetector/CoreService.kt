@@ -13,6 +13,9 @@ import android.media.RingtoneManager
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
@@ -41,7 +44,7 @@ class CoreService : Service() {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
         }
 
-        /** 仅停止无卡机的响铃与来电通知，不停止常驻服务 */
+        /** 仅停止无卡机的响铃/震动与来电通知，不停止常驻服务 */
         fun stopRingingNow(context: Context) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_STOP_RING)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
@@ -64,9 +67,13 @@ class CoreService : Service() {
 
     private var ringtone: Ringtone? = null
 
+    // 震动
+    private var vibrator: Vibrator? = null
+
     override fun onCreate() {
         super.onCreate()
         nm = getSystemService(NotificationManager::class.java)
+        vibrator = getSystemVibrator()
         createChannels()
         startForeground(AppConfig.NID_PERSIST, buildPersistNotification("启动中..."))
         startNetworking()
@@ -163,7 +170,6 @@ class CoreService : Service() {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
         when (obj.optString("type")) {
             "HELLO" -> {
-                // 仅 sender 需要记录 peer
                 if (isHasSimReady()) {
                     peerIp = fromIp
                     peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
@@ -172,7 +178,6 @@ class CoreService : Service() {
             }
 
             "INVITE" -> {
-                // 仅 receiver 处理来电邀请
                 if (!isHasSimReady()) {
                     val number = obj.optString("number", "未知号码")
                     val cid = obj.optString("callId", UUID.randomUUID().toString())
@@ -187,14 +192,12 @@ class CoreService : Service() {
                         peerAudioPort = senderAudioPort
                     )
 
-                    // 新来电前先停掉旧响铃/旧通知（避免叠加）
                     stopRinging()
                     ringAndShowIncoming(number)
                 }
             }
 
             "ACCEPT" -> {
-                // 仅 sender 收到：对方接受，开始通话
                 if (isHasSimReady()) {
                     val cid = obj.optString("callId", "")
                     val receiverAudioPort = obj.optInt("audioPort", 0)
@@ -213,9 +216,7 @@ class CoreService : Service() {
             }
 
             "DECLINE" -> {
-                if (isHasSimReady()) {
-                    updatePersist("有卡端：对方拒绝")
-                }
+                if (isHasSimReady()) updatePersist("有卡端：对方拒绝")
             }
 
             "HANGUP" -> {
@@ -226,7 +227,6 @@ class CoreService : Service() {
     }
 
     private fun handleIncomingPstn(number: String) {
-        // sender 端：收到外部来电事件 -> 发 INVITE 给 receiver
         if (!isHasSimReady()) return
 
         val peer = peerIp
@@ -243,7 +243,7 @@ class CoreService : Service() {
             .put("type", "INVITE")
             .put("callId", cid)
             .put("number", number)
-            .put("audioPort", myAudioPort) // 我方音频端口（对方要发给我）
+            .put("audioPort", myAudioPort)
             .put("controlPort", AppConfig.CONTROL_PORT)
 
         val data = obj.toString().toByteArray(Charsets.UTF_8)
@@ -254,7 +254,6 @@ class CoreService : Service() {
     }
 
     private fun ringAndShowIncoming(number: String) {
-        // 1) 全屏来电通知（点击进入 IncomingCallActivity）
         val fullScreenIntent = Intent(this, IncomingCallActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
@@ -265,7 +264,7 @@ class CoreService : Service() {
 
         val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
-            .setContentTitle("局域网来电")
+            .setContentTitle("来电")
             .setContentText("号码：$number")
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -275,11 +274,11 @@ class CoreService : Service() {
 
         nm.notify(AppConfig.NID_INCOMING, n)
 
-        // 2) 响铃
         startRinging()
     }
 
     private fun startRinging() {
+        // 铃声
         try {
             if (ringtone?.isPlaying == true) return
             val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
@@ -293,12 +292,49 @@ class CoreService : Service() {
                 play()
             }
         } catch (_: Throwable) {}
+
+        // 震动（循环）
+        startVibrateLoop()
     }
 
     private fun stopRinging() {
         try { ringtone?.stop() } catch (_: Throwable) {}
         ringtone = null
+        stopVibrate()
         nm.cancel(AppConfig.NID_INCOMING)
+    }
+
+    private fun getSystemVibrator(): Vibrator? {
+        return try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val vm = getSystemService(VibratorManager::class.java)
+                vm?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun startVibrateLoop() {
+        try {
+            val v = vibrator ?: return
+            if (!v.hasVibrator()) return
+
+            val pattern = longArrayOf(0, 500, 400, 500, 1200) // 震动/停/震动/停...
+            if (Build.VERSION.SDK_INT >= 26) {
+                v.vibrate(VibrationEffect.createWaveform(pattern, 0))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(pattern, 0)
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun stopVibrate() {
+        try { vibrator?.cancel() } catch (_: Throwable) {}
     }
 
     private fun updatePersist(text: String) {
@@ -321,4 +357,12 @@ class CoreService : Service() {
     }
 
     private fun createChannels() {
-        if 
+        if (Build.VERSION.SDK_INT < 26) return
+        nm.createNotificationChannel(
+            NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
+        )
+    }
+}
