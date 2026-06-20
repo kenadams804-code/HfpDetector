@@ -21,13 +21,14 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    # 自动重置并安装最稳定、不冲突的官方 Gradle 编译驱动
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v3
-      with:
-        gradle-version: 8.1.1
+    # 【终极核心新增】：在开工前，彻底格式化删掉我们之前在网页端折腾残留的旧 gradle 配置，用官方正统命令原地瞬间生成完完整整、包含最新二进制 jar 钥匙的全新官方驱动！
+    - name: Force Regenerate Official Gradle Wrapper
+      run: |
+        rm -f gradlew gradlew.bat
+        rm -rf gradle/
+        gradle wrapper --gradle-version 8.1.1
 
-    # 【核心修复】：在编译前，通过 Linux 命令强行赋予 gradlew 脚本最高执行权限，彻底解决 Permission denied 报错
+    # 强行赋予新生成的官方脚本最高执行权限
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
