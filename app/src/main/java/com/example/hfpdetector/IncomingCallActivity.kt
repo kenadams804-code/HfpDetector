@@ -2,7 +2,6 @@ package com.example.hfpdetector
 
 import android.Manifest
 import android.app.Activity
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -67,11 +66,14 @@ class IncomingCallActivity : Activity() {
             json = JSONObject()
                 .put("type", "ACCEPT")
                 .put("callId", invite.callId)
-                .put("audioPort", myAudioPort)  // 我方音频端口（对方要发给我）
+                .put("audioPort", myAudioPort) // 我方音频端口（对方要发给我）
                 .toString()
         )
 
-        // 2) 启动音频服务（我方开始收发音频）
+        // 2) 立刻停铃（只停铃，不停 CoreService）
+        CoreService.stopRingingNow(this)
+
+        // 3) 启动音频服务（我方开始收发音频）
         AudioCallService.start(
             context = this,
             peerIp = invite.peerIp,
@@ -79,15 +81,13 @@ class IncomingCallActivity : Activity() {
             myAudioPort = myAudioPort
         )
 
-        // 停止响铃 UI
-        stopService(Intent(this, CoreService::class.java)) // 这里只是为了停铃不够优雅，但简单有效
-        CoreService.start(this) // 立刻重启 CoreService，保持常驻（停铃状态也刷新）
-
+        CallState.incoming = null
         finish()
     }
 
     private fun decline() {
         val invite = CallState.incoming ?: run { finish(); return }
+
         sendControl(
             ip = invite.peerIp,
             port = invite.peerControlPort,
@@ -96,6 +96,8 @@ class IncomingCallActivity : Activity() {
                 .put("callId", invite.callId)
                 .toString()
         )
+
+        CoreService.stopRingingNow(this)
         CallState.incoming = null
         finish()
     }
