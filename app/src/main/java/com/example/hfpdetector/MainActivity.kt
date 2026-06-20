@@ -13,45 +13,26 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class MainActivity : Activity() {
 
-    private lateinit var tvTitle: TextView
-    private lateinit var tvSummary: TextView
-    private lateinit var tvLast: TextView
+    private lateinit var tv: TextView
 
-    private lateinit var swBoot: Switch
     private lateinit var swSilence: Switch
-
     private lateinit var btnPerm: Button
     private lateinit var btnStart: Button
     private lateinit var btnRole: Button
+    private lateinit var btnLog: Button
+
+    private lateinit var btnShowQr: Button
+    private lateinit var btnPair: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        tvTitle = TextView(this).apply {
-            textSize = 20f
-            setPadding(40, 50, 40, 10)
-            text = "LanCall（局域网接听）"
-        }
-
-        tvSummary = TextView(this).apply {
+        tv = TextView(this).apply {
             textSize = 16f
-            setPadding(40, 10, 40, 10)
-        }
-
-        tvLast = TextView(this).apply {
-            textSize = 14f
-            setPadding(40, 10, 40, 20)
-        }
-
-        swBoot = Switch(this).apply {
-            text = "开机自启动常驻服务（重启后自动可用）"
-            isChecked = Prefs.isAutoStartOnBoot(this@MainActivity)
+            setPadding(40, 50, 40, 10)
         }
 
         swSilence = Switch(this).apply {
@@ -62,35 +43,51 @@ class MainActivity : Activity() {
         btnPerm = Button(this).apply { text = "申请权限（通知/麦克风）" }
         btnStart = Button(this).apply { text = "启动常驻服务（两台手机都点一次）" }
         btnRole = Button(this).apply { text = "（仅有卡手机）开启来电号码同步（系统授权）" }
+        btnLog = Button(this).apply { text = "打开日志页（查看全部运行信息）" }
+
+        btnShowQr = Button(this).apply { text = "（无卡手机）显示配对二维码" }
+        btnPair = Button(this).apply { text = "（有卡手机）手动配对（输入IP/扫码）" }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(tvTitle)
-            addView(tvSummary)
-            addView(tvLast)
-            addView(swBoot)
+            addView(tv)
             addView(swSilence)
             addView(btnPerm)
             addView(btnStart)
             addView(btnRole)
+            addView(btnPair)
+            addView(btnShowQr)
+            addView(btnLog)
         }
         setContentView(root)
 
-        swBoot.setOnCheckedChangeListener { _, checked ->
-            Prefs.setAutoStartOnBoot(this, checked)
-            refreshUi()
-        }
-
         swSilence.setOnCheckedChangeListener { _, checked ->
             Prefs.setSilencePstn(this, checked)
+            AppLog.i(this, "设置：有卡机来电尽量静音=$checked")
             refreshUi()
         }
 
         btnPerm.setOnClickListener { requestRuntimePermissions() }
-        btnStart.setOnClickListener { CoreService.start(this) }
+        btnStart.setOnClickListener {
+            CoreService.start(this)
+            AppLog.i(this, "手动启动 CoreService")
+        }
+
         btnRole.setOnClickListener { requestCallScreeningRole() }
 
-        // 你要求“立即触发”，默认启动常驻服务
+        btnLog.setOnClickListener {
+            startActivity(Intent(this, LogActivity::class.java))
+        }
+
+        btnShowQr.setOnClickListener {
+            startActivity(Intent(this, ShowQrActivity::class.java))
+        }
+
+        btnPair.setOnClickListener {
+            startActivity(Intent(this, PairingActivity::class.java))
+        }
+
+        // 默认启动（你要求“立即触发”）
         CoreService.start(this)
         refreshUi()
     }
@@ -104,44 +101,27 @@ class MainActivity : Activity() {
             rm?.isRoleHeld(RoleManager.ROLE_CALL_SCREENING) == true
         } else false
 
-        // 无卡机不需要“静音有卡机来电”
         swSilence.visibility = if (hasSimReady) View.VISIBLE else View.GONE
-        swSilence.isChecked = Prefs.isSilencePstn(this)
-
-        // 无卡机不需要申请“来电筛选角色”
         btnRole.visibility = if (hasSimReady) View.VISIBLE else View.GONE
+        btnPair.visibility = if (hasSimReady) View.VISIBLE else View.GONE
+        btnShowQr.visibility = if (hasSimReady) View.GONE else View.VISIBLE
 
-        val syncText = if (hasSimReady) {
-            if (roleHeld) "来电号码同步：已开启" else "来电号码同步：未开启（点下面按钮开启）"
-        } else {
-            "本机为无卡手机：只负责接听与响铃"
-        }
+        val manualPair = Prefs.isManualPairEnabled(this)
+        val peerIp = Prefs.getPeerIp(this)
 
-        tvSummary.text = buildString {
-            append(syncText)
-            append("\n\n使用方法：")
-            append("\n1）两台手机安装同一个 APK，并连接同一个 Wi‑Fi")
-            append("\n2）两台手机都打开 App，点一次“启动常驻服务”")
+        tv.text = buildString {
+            append("LanCall 已启动（后台常驻工作中）\n")
             if (hasSimReady) {
-                append("\n3）在有卡手机上点“开启来电号码同步（系统授权）”，按系统提示允许")
-                append("\n4）外部来电时：无卡手机会弹出来电界面显示号码，滑动接听即可内网对讲")
+                append("本机：有卡手机\n")
+                append(if (roleHeld) "来电号码同步：已开启\n" else "来电号码同步：未开启（点按钮开启）\n")
+                append("手动配对：${if (manualPair) "启用" else "未启用"}\n")
+                append("接听端 IP：${if (peerIp.isBlank()) "未设置（可扫码）" else peerIp}\n")
             } else {
-                append("\n3）等待有卡手机触发来电后，本机会弹出接听界面")
+                append("本机：无卡手机（接听端）\n")
+                val ip = NetUtils.getLocalWifiIp(this@MainActivity)
+                append("本机 Wi‑Fi IP：${if (ip.isBlank()) "未获取到" else ip}\n")
             }
-            append("\n\n开机自启说明：")
-            append("\n- 打开“开机自启动常驻服务”后，重启手机会自动启动服务。")
-            append("\n- 部分系统仍需在系统设置里允许自启动/后台运行/忽略电池优化。")
-        }
-
-        val lastNumber = Prefs.getLastNumber(this)
-        val lastTime = Prefs.getLastTime(this)
-        tvLast.text = if (hasSimReady && roleHeld && lastTime > 0) {
-            val sdf = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
-            "最近一次收到系统来电回调：${sdf.format(Date(lastTime))}\n号码：$lastNumber"
-        } else if (hasSimReady && roleHeld) {
-            "最近一次收到系统来电回调：暂无（请用第三台手机打进来测试）"
-        } else {
-            ""
+            append("\n详细运行信息请进“日志页”查看。")
         }
     }
 
@@ -150,6 +130,10 @@ class MainActivity : Activity() {
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             perms.add(Manifest.permission.RECORD_AUDIO)
+        }
+
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            perms.add(Manifest.permission.CAMERA)
         }
 
         if (Build.VERSION.SDK_INT >= 33) {
