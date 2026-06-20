@@ -21,20 +21,20 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    # 【终极必杀命令】：强制让云端自己用最权威的官方命令生成完完整整、绝不残缺的 gradlew 和 jar 钥匙！
+    - name: Force Regenerate Official Gradle Wrapper
+      run: |
+        rm -f gradlew gradlew.bat
+        rm -rf gradle/
+        gradle wrapper --gradle-version 8.1
+
     - name: Grant execute permission for gradlew
       run: |
-        if [ -f gradlew ]; then
-          chmod +x gradlew
-        fi
+        chmod +x gradlew
 
     - name: Build with Gradle
       run: |
-        if [ -f gradlew ]; then
-          ./gradlew assembleDebug
-        else
-          echo "未找到编译脚本！"
-          exit 1
-        fi
+        ./gradlew assembleDebug
 
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
