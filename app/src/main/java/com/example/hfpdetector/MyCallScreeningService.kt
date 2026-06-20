@@ -1,9 +1,7 @@
 package com.example.hfpdetector
 
-import android.os.Build
-import android.telecom.CallScreeningService
 import android.telecom.Call
-import java.util.Locale
+import android.telecom.CallScreeningService
 
 class MyCallScreeningService : CallScreeningService() {
 
@@ -14,17 +12,18 @@ class MyCallScreeningService : CallScreeningService() {
             "未知号码"
         }
 
-        // 通知 CoreService：外部来电触发
+        // 触发：把号码推给无卡机
         CoreService.notifyIncomingPstn(this, number)
 
-        // 不拦截这通电话（只是“监听并触发”）
+        val silence = Prefs.isSilencePstn(this)
+
+        // 不拦截这通电话：只是监听并触发
         val response = CallResponse.Builder()
             .setDisallowCall(false)
             .setRejectCall(false)
             .setSkipCallLog(false)
             .setSkipNotification(false)
-            // 你如果希望“有卡机不响铃”，可以改成 true（但不同机型效果不同）
-            .setSilenceCall(false)
+            .setSilenceCall(silence) // 这里由开关决定
             .build()
 
         respondToCall(callDetails, response)
