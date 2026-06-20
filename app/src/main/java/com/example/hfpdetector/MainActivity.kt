@@ -13,6 +13,11 @@ import android.widget.TextView
 
 class MainActivity : Activity() {
 
+    companion object {
+        // BluetoothProfile.HEADSET_CLIENT 有些 SDK/ROM 编译环境里不存在，直接用 profile id = 16
+        private const val PROFILE_HEADSET_CLIENT = 16
+    }
+
     private lateinit var tv: TextView
     private val mainHandler = Handler(Looper.getMainLooper())
     private var finished = false
@@ -62,7 +67,6 @@ class MainActivity : Activity() {
             return
         }
 
-        // 额外检测：有些 ROM 会直接删除这个类
         val classExists = try {
             Class.forName("android.bluetooth.BluetoothHeadsetClient")
             true
@@ -77,7 +81,7 @@ class MainActivity : Activity() {
                 this,
                 object : BluetoothProfile.ServiceListener {
                     override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                        if (profile == BluetoothProfile.HEADSET_CLIENT) {
+                        if (profile == PROFILE_HEADSET_CLIENT) {
                             finished = true
                             tv.text =
                                 "🎉 恭喜支持 HFP Headset Client（可以走方案A）\nprofile=$profile\nproxy=${proxy.javaClass.name}"
@@ -89,7 +93,7 @@ class MainActivity : Activity() {
                         // ignore
                     }
                 },
-                BluetoothProfile.HEADSET_CLIENT
+                PROFILE_HEADSET_CLIENT
             )
         } catch (t: Throwable) {
             tv.text = "❌ 调用 getProfileProxy 失败：${t.javaClass.simpleName}\n${t.message}"
@@ -101,7 +105,6 @@ class MainActivity : Activity() {
             return
         }
 
-        // 超时：请求成功但迟迟不回调，也判定不支持/被阉割
         mainHandler.postDelayed({
             if (!finished) {
                 tv.text =
