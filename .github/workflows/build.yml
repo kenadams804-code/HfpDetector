@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APK (Cloud Only)
 
 on:
   workflow_dispatch:
@@ -10,6 +10,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GRADLE_VERSION: "8.7"
+      ANDROID_PLATFORM: "34"
+      ANDROID_BUILD_TOOLS: "34.0.0"
 
     steps:
       - name: Checkout code
@@ -20,16 +24,36 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
+      # 安装 Android SDK（关键：否则经常会报 “SDK location not found”）
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Print Gradle version (from wrapper)
-        run: ./gradlew --version
+      - name: Install required Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+          yes | sdkmanager --licenses
+
+      # 给 Android Gradle Plugin 一个明确的 SDK 路径
+      - name: Write local.properties (sdk.dir)
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          cat local.properties
+
+      - name: Download Gradle (fixed version, no wrapper)
+        run: |
+          set -e
+          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
+          unzip -q gradle.zip
+          mv gradle-${GRADLE_VERSION} /tmp/gradle
+          /tmp/gradle/bin/gradle --version
 
       - name: Build Debug APK
-        run: ./gradlew clean assembleDebug --stacktrace --no-daemon
+        run: |
+          /tmp/gradle/bin/gradle clean assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
