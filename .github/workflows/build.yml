@@ -21,6 +21,15 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    # 【核心新增】：如果发现没有钥匙文件，让云端打包机在线去官方服务器下载最新的 jar 钥匙
+    - name: Automatically Download Gradle Wrapper Jar
+      run: |
+        mkdir -p gradle/wrapper
+        if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+          echo "本地缺少钥匙文件，正在从官方下载..."
+          curl -Lo gradle/wrapper/gradle-wrapper.jar https://githubusercontent.com
+        fi
+
     - name: Grant execute permission for gradlew
       run: |
         if [ -f gradlew ]; then
@@ -32,5 +41,12 @@ jobs:
         if [ -f gradlew ]; then
           ./gradlew assembleDebug
         else
-          echo "等待后续安卓基础文件上传..."
+          echo "未找到编译脚本！"
+          exit 1
         fi
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: hfp-detector-apk
+        path: app/build/outputs/apk/debug/app-debug.apk
