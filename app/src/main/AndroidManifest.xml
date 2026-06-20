@@ -16,6 +16,9 @@
     <!-- 震动（无卡机来电时震动提示） -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- 开机广播 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -43,3 +46,30 @@
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
         <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 常驻服务：局域网发现 + 控制信令 -->
+        <service
+            android:name=".CoreService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- 通话服务：真正采集/播放音频 -->
+        <service
+            android:name=".AudioCallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|phoneCall" />
+
+        <!-- 关键：来电筛选服务（有卡机授权为来电筛选应用后，系统会回调 onScreenCall） -->
+        <service
+            android:name=".MyCallScreeningService"
+            android:exported="true"
+            android:permission="android.permission.BIND_SCREENING_SERVICE">
+            <intent-filter>
+                <action 
