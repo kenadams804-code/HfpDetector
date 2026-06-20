@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Wi-Fi 广播发现 -->
+    <!-- Wi-Fi 广播发现（仍保留：没手动配对时可用） -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
@@ -13,10 +13,13 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
-    <!-- 震动（无卡机来电时震动提示） -->
+    <!-- 震动 -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
-    <!-- 开机广播 -->
+    <!-- 扫码 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- 开机广播（如果你已做开机自启，保留即可；没有也不影响） -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- 前台服务 -->
@@ -25,7 +28,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
 
-    <!-- 通知（Android 13+ 运行时授权；全屏来电也依赖通知能力） -->
+    <!-- 通知（Android 13+ 运行时授权；全屏来电依赖通知） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
@@ -45,6 +48,7 @@
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
+        <!-- 主界面 -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -54,22 +58,56 @@
             </intent-filter>
         </activity>
 
+        <!-- 日志页 -->
+        <activity
+            android:name=".LogActivity"
+            android:exported="false" />
+
+        <!-- 有卡机：手动配对页（输入 IP / 扫码） -->
+        <activity
+            android:name=".PairingActivity"
+            android:exported="false" />
+
+        <!-- 无卡机：展示二维码页 -->
+        <activity
+            android:name=".ShowQrActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+
         <!-- 常驻服务：局域网发现 + 控制信令 -->
         <service
             android:name=".CoreService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- 通话服务：真正采集/播放音频 -->
+        <!-- 通话服务：音频收发 -->
         <service
             android:name=".AudioCallService"
             android:exported="false"
             android:foregroundServiceType="microphone|phoneCall" />
 
-        <!-- 关键：来电筛选服务（有卡机授权为来电筛选应用后，系统会回调 onScreenCall） -->
+        <!-- 来电筛选服务（有卡机授权为来电筛选应用后回调） -->
         <service
             android:name=".MyCallScreeningService"
             android:exported="true"
             android:permission="android.permission.BIND_SCREENING_SERVICE">
             <intent-filter>
-                <action 
+                <action android:name="android.telecom.CallScreeningService" />
+            </intent-filter>
+        </service>
+
+        <!-- 如果你之前已加 BootReceiver，这里也可以继续保留（没加也不影响本次功能） -->
+        <!--
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        -->
+
+    </application>
+
+</manifest>
