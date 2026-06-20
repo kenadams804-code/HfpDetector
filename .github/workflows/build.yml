@@ -56,7 +56,7 @@ jobs:
           mv gradle-${GRADLE_VERSION} /tmp/gradle
           /tmp/gradle/bin/gradle --version
 
-      - name: Build Debug APK (print real Kotlin error lines)
+           - name: Build Debug APK (extract error lines)
         shell: bash
         run: |
           set +e
@@ -64,12 +64,16 @@ jobs:
           status=${PIPESTATUS[0]}
 
           echo ""
-          echo "================ Kotlin error lines (e:) ================"
+          echo "==================== Kotlin compiler error lines (e:) ===================="
           grep -n "^e: " gradle.log || true
 
           echo ""
-          echo "================ Manifest merger lines ================"
-          grep -n "Manifest merger failed" gradle.log || true
+          echo "==================== Other error keywords ===================="
+          grep -n "Unresolved reference\|error:\|Compilation error\|FAILURE: Build failed" gradle.log || true
+
+          echo ""
+          echo "==================== Tail (last 120 lines) ===================="
+          tail -n 120 gradle.log || true
 
           exit $status
 
