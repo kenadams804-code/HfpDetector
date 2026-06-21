@@ -2,6 +2,7 @@ package com.example.hfpdetector
 
 import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
 import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -55,11 +56,24 @@ class SettingsActivity : Activity() {
         box.removeAllViews()
 
         addPermRow(
-            title = "通知（用于来电全屏弹出/通知）",
+            title = "通知总开关（来电弹窗依赖）",
             isOn = { NotificationManagerCompat.from(this).areNotificationsEnabled() },
             onEnable = { openNotificationSettings() },
             onDisable = { openNotificationSettings() }
         )
+
+        // 新增：全屏通知（Android 14+ 可能被系统单独关掉）
+        addPermRow(
+            title = "允许全屏来电弹窗（系统开关，Android 14+）",
+            isOn = { canUseFullScreenIntentCompat() },
+            onEnable = { openFullScreenIntentSettings() },
+            onDisable = { openFullScreenIntentSettings() }
+        )
+
+        // 新增：直接打开“来电通知通道”设置，用户可手动调到“高/允许悬浮/锁屏/全屏”
+        addActionRow("来电通知通道设置（重要性/悬浮/锁屏/全屏）") {
+            openCallChannelSettings()
+        }
 
         addRuntimePermRow("麦克风 RECORD_AUDIO（用于内网通话）", Manifest.permission.RECORD_AUDIO)
         addRuntimePermRow("相机 CAMERA（用于扫码配对）", Manifest.permission.CAMERA)
@@ -70,7 +84,6 @@ class SettingsActivity : Activity() {
 
         addCallScreeningRow()
 
-        // 配对入口（不再用 isOn={true} 这种写法）
         addActionRow("打开配对页（有卡机：填IP/扫码）") {
             startActivity(Intent(this, PairingActivity::class.java))
         }
@@ -78,27 +91,9 @@ class SettingsActivity : Activity() {
             startActivity(Intent(this, ShowQrActivity::class.java))
         }
 
-        addPermRow(
-            title = "蓝牙耳机模式检测（HFP 支持性）",
-            isOn = { Prefs.getHfpSupport(this) == "YES" },
-            onEnable = {
-                if (!HfpCompat.canRunCheck(this)) {
-                    toast("请先打开蓝牙，并授予蓝牙连接权限")
-                    return@addPermRow
-                }
-                Prefs.setHfpSupport(this, "UNKNOWN")
-                toast("检测中…约5秒")
-                HfpCompat.checkAsync(this) {
-                    toast("检测结果：$it（YES=支持，NO=不支持）")
-                    render()
-                }
-            },
-            onDisable = {
-                Prefs.setHfpSupport(this, "UNKNOWN")
-                toast("已清除检测结果")
-                render()
-            }
-        )
+        addActionRow("打开系统日志页") {
+            startActivity(Intent(this, LogActivity::class.java))
+        }
 
         addActionRow("打开应用系统设置（统一管理权限/后台/自启动）") {
             openAppDetailsSettings()
@@ -157,16 +152,12 @@ class SettingsActivity : Activity() {
 
         val st = TextView(this).apply {
             textSize = 12f
-            val on = isOn()
-            text = if (on) "状态：开" else "状态：关"
+            text = if (isOn()) "状态：开" else "状态：关"
         }
 
         val btn = Button(this).apply {
-            val on = isOn()
-            text = if (on) "去关闭（系统）" else "去开启"
-            setOnClickListener {
-                if (isOn()) onDisable() else onEnable()
-            }
+            text = if (isOn()) "去关闭（系统）" else "去开启"
+            setOnClickListener { if (isOn()) onDisable() else onEnable() }
         }
 
         row.addView(tv)
@@ -210,6 +201,39 @@ class SettingsActivity : Activity() {
             putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
         }
         startActivity(i)
+    }
+
+    private fun openCallChannelSettings() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            val i = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                putExtra(Settings.EXTRA_CHANNEL_ID, AppConfig.CH_CALL)
+            }
+            startActivity(i)
+        } else {
+            openNotificationSettings()
+        }
+    }
+
+    private fun canUseFullScreenIntentCompat(): Boolean {
+        return if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                val nm = getSystemService(NotificationManager::class.java)
+                nm?.canUseFullScreenIntent() == true
+            } catch (_: Throwable) {
+                true
+            }
+        } else true
+    }
+
+    private fun openFullScreenIntentSettings() {
+        // Android 14+ 的全屏通知开关页面（不同 ROM 可能会有差异）
+        val action = "android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENT"
+        val i = Intent(action).apply {
+            data = Uri.parse("package:$packageName")
+        }
+        runCatching { startActivity(i) }
+            .onFailure { openNotificationSettings() }
     }
 
     private fun toast(s: String) {
