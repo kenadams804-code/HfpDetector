@@ -1,20 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 网络 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Wi-Fi 广播/多播 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- 语音对讲 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- 震动 -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- 通知 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
+    <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -23,7 +29,7 @@
     <!-- 扫码 -->
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- 蓝牙检测（如果你有做 HFP 检测就保留） -->
+    <!-- 蓝牙检测/模式（若未用也不影响） -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
 
@@ -46,16 +52,19 @@
             android:name=".SettingsActivity"
             android:exported="false" />
 
-        <!-- 有卡机：配对页（填IP/扫码） -->
         <activity
             android:name=".PairingActivity"
             android:exported="false" />
 
-        <!-- 无卡机：二维码展示页 -->
         <activity
             android:name=".ShowQrActivity"
             android:exported="false"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+
+        <!-- 系统日志页（你要的） -->
+        <activity
+            android:name=".LogActivity"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"
