@@ -239,7 +239,6 @@ class CoreService : Service() {
                     peerIp = fromIp
                     peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
                     Prefs.markPeerSeen(this, fromIp.hostAddress)
-                    // 这个日志很密，先不打印
                 }
             }
 
@@ -266,44 +265,44 @@ class CoreService : Service() {
                 AppLog.i(this, "收到 PING_TEST，已回复 PONG_TEST -> ${fromIp.hostAddress}:$fromPort")
             }
 
-            // ✅ 核心：无卡机收到 INVITE 后回 ACK，帮助你确认“到底有没有收到INVITE”
+            /**
+             * ✅ 核心修复：
+             * 不再依赖 isHasSimReady() 判断。收到 INVITE 一律当作“接听端来电”处理并回 INVITE_ACK。
+             * 这样就算某些 ROM 的 simState 在无卡机上返回异常，也不会丢 INVITE。
+             */
             "INVITE" -> {
-                if (!isHasSimReady()) {
-                    Prefs.markPeerSeen(this, fromIp.hostAddress)
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
 
-                    val number = obj.optString("number", "未知号码")
-                    val cid = obj.optString("callId", UUID.randomUUID().toString())
-                    val senderAudioPort = obj.optInt("audioPort", 0)
-                    val senderCtrlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
-                    val isTest = obj.optBoolean("test", false)
+                val number = obj.optString("number", "未知号码")
+                val cid = obj.optString("callId", UUID.randomUUID().toString())
+                val senderAudioPort = obj.optInt("audioPort", 0)
+                val senderCtrlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
+                val isTest = obj.optBoolean("test", false)
 
-                    // 回 ACK
-                    val ack = JSONObject()
-                        .put("type", "INVITE_ACK")
-                        .put("callId", cid)
-                        .put("test", isTest)
-                    sendJson(fromIp, fromPort, ack)
+                // 回 ACK（让有卡机确认无卡机确实收到了 INVITE）
+                val ack = JSONObject()
+                    .put("type", "INVITE_ACK")
+                    .put("callId", cid)
+                    .put("test", isTest)
+                sendJson(fromIp, fromPort, ack)
 
-                    CallState.incoming = PendingInvite(
-                        callId = cid,
-                        number = number,
-                        peerIp = fromIp.hostAddress,
-                        peerControlPort = senderCtrlPort,
-                        peerAudioPort = senderAudioPort
-                    )
+                CallState.incoming = PendingInvite(
+                    callId = cid,
+                    number = number,
+                    peerIp = fromIp.hostAddress,
+                    peerControlPort = senderCtrlPort,
+                    peerAudioPort = senderAudioPort
+                )
 
-                    AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
-                    stopRinging()
-                    ringAndShowIncoming(number)
-                }
+                AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
+                stopRinging()
+                ringAndShowIncoming(number)
             }
 
-            // 有卡机收到 ACK
             "INVITE_ACK" -> {
-                if (isHasSimReady()) {
-                    Prefs.markPeerSeen(this, fromIp.hostAddress)
-                    AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
-                }
+                // 有卡机收到 ACK（这里不依赖 simState，收到就记日志）
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
             "ACCEPT" -> {
@@ -385,7 +384,7 @@ class CoreService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // 通知可能因 Android 13+ 未开通知权限而失败，所以必须 try/catch
+        // 通知可能因 Android 13+ 未开通知权限而失败，所以 try/catch + 记录
         try {
             val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
@@ -402,7 +401,6 @@ class CoreService : Service() {
             AppLog.i(this, "接听端：发布来电通知失败（可能未开通知权限）：${t.javaClass.simpleName} ${t.message}")
         }
 
-        // 即使通知发不出去，也尽量响铃/震动（至少你能听到）
         startRinging()
     }
 
