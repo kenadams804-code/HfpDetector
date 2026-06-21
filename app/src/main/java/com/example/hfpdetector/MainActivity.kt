@@ -28,8 +28,8 @@ class MainActivity : Activity() {
     private lateinit var btnPair: Button
     private lateinit var btnShowQr: Button
     private lateinit var btnLog: Button
-    private lateinit var btnSms: Button
-    private lateinit var btnCalls: Button
+
+    private lateinit var btnTestInvite: Button
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
@@ -59,7 +59,6 @@ class MainActivity : Activity() {
             setTextColor(Color.DKGRAY)
         }
 
-        // 模式下拉框（两项永远显示）
         spinner = Spinner(this)
         modeAdapter = ModeAdapter(this, listOf("局域网模式（LAN）", "蓝牙耳机模式（BT）"))
         spinner.adapter = modeAdapter
@@ -68,9 +67,8 @@ class MainActivity : Activity() {
         lastGoodSelection = if (currentMode == "BT") 1 else 0
         spinner.setSelection(lastGoodSelection)
 
-        // ===== 常驻服务：设置风格一行（图标变色 + 右侧Switch）=====
         val (rowService, serviceSwitch, serviceIcon) = makeSettingSwitchRow(
-            iconRes = android.R.drawable.ic_popup_sync, // 系统自带图标
+            iconRes = android.R.drawable.ic_popup_sync,
             title = "常驻服务",
             subtitle = "开=后台工作（来电/连接可用）"
         )
@@ -79,7 +77,6 @@ class MainActivity : Activity() {
         swService.isChecked = Prefs.isServiceEnabled(this)
         updateServiceIconColor(swService.isChecked)
 
-        // 有卡机静音开关（普通 Switch 即可）
         swSilence = Switch(this).apply {
             text = "（仅有卡机）来电尽量静音（主要无卡机响）"
             isChecked = Prefs.isSilencePstn(this@MainActivity)
@@ -91,8 +88,8 @@ class MainActivity : Activity() {
         btnShowQr = Button(this).apply { text = "显示二维码（无卡机）" }
         btnLog = Button(this).apply { text = "系统日志（连通性测试/导出诊断包）" }
 
-        btnSms = Button(this).apply { text = "短信箱（App内）" }
-        btnCalls = Button(this).apply { text = "通话记录（App内）" }
+        btnTestInvite = Button(this).apply { text = "发送测试来电（INVITE）" }
+        btnTestInvite.visibility = if (hasSim) View.VISIBLE else View.GONE
 
         btnPair.visibility = if (hasSim) View.VISIBLE else View.GONE
         btnShowQr.visibility = if (hasSim) View.GONE else View.VISIBLE
@@ -115,9 +112,7 @@ class MainActivity : Activity() {
             addView(btnPair)
             addView(btnShowQr)
             addView(btnLog)
-
-            addView(btnSms)
-            addView(btnCalls)
+            addView(btnTestInvite)
         }
         setContentView(root)
 
@@ -144,7 +139,6 @@ class MainActivity : Activity() {
                 Prefs.setMode(this@MainActivity, if (position == 1) "BT" else "LAN")
                 refresh()
             }
-
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
 
@@ -153,18 +147,12 @@ class MainActivity : Activity() {
         btnShowQr.setOnClickListener { startActivity(Intent(this, ShowQrActivity::class.java)) }
         btnLog.setOnClickListener { startActivity(Intent(this, LogActivity::class.java)) }
 
-        btnSms.setOnClickListener {
-            runCatching { startActivity(Intent(this, Class.forName("com.example.hfpdetector.SmsListActivity"))) }
-                .onFailure { Toast.makeText(this, "短信箱页面尚未加入/类名不匹配", Toast.LENGTH_SHORT).show() }
-        }
-        btnCalls.setOnClickListener {
-            runCatching { startActivity(Intent(this, Class.forName("com.example.hfpdetector.CallLogActivity"))) }
-                .onFailure { Toast.makeText(this, "通话记录页面尚未加入/类名不匹配", Toast.LENGTH_SHORT).show() }
+        btnTestInvite.setOnClickListener {
+            CoreService.sendTestInvite(this)
+            Toast.makeText(this, "已发送测试 INVITE（看无卡机是否弹窗）", Toast.LENGTH_SHORT).show()
         }
 
-        // 默认根据开关决定是否启动
         if (Prefs.isServiceEnabled(this)) CoreService.start(this)
-
         refresh()
     }
 
@@ -188,6 +176,9 @@ class MainActivity : Activity() {
         modeAdapter.enableBt = serviceOn && connected && hfpYes
         modeAdapter.notifyDataSetChanged()
 
+        // 测试 INVITE 按钮：必须服务开 + 已连接
+        btnTestInvite.isEnabled = serviceOn && connected
+
         val localIp = runCatching { NetUtils.getLocalWifiIp(this) }.getOrDefault("")
         val seenAgoSec = run {
             val ts = Prefs.getPeerSeenTs(this)
@@ -204,19 +195,13 @@ class MainActivity : Activity() {
             append("对端IP(最近看到)：${Prefs.getPeerSeenIp(this@MainActivity).ifBlank { "(空)" }}\n")
             append("本机Wi‑Fi IP：${if (localIp.isBlank()) "(未获取到)" else localIp}\n")
             append("蓝牙耳机模式支持：${Prefs.getHfpSupport(this@MainActivity)}\n")
-            append("提示：日志页里可一键“连通性测试/导出诊断包”。")
         }
     }
 
     private fun updateServiceIconColor(on: Boolean) {
-        // 开=绿色，关=灰色（你也可以改成更亮的绿色）
         ivService.setColorFilter(Color.parseColor(if (on) "#2E7D32" else "#9E9E9E"))
     }
 
-    /**
-     * 生成一条“设置风格”的行：左图标 + 两行文字 + 右侧Switch
-     * 返回 Triple(row, switch, icon)
-     */
     private fun makeSettingSwitchRow(
         iconRes: Int,
         title: String,
@@ -256,8 +241,6 @@ class MainActivity : Activity() {
         textBox.addView(tvSub)
 
         val sw = Switch(this)
-
-        // 点击整行也切换开关（更像系统设置）
         row.setOnClickListener { sw.isChecked = !sw.isChecked }
 
         row.addView(icon)
