@@ -10,7 +10,6 @@ object Prefs {
     private const val K_LAST_TIME = "last_time"
     private const val K_AUTO_START_BOOT = "auto_start_boot"
 
-    // 手动配对（有卡机用）
     private const val K_MANUAL_PAIR_ENABLED = "manual_pair_enabled"
     private const val K_PEER_IP = "peer_ip"
 
