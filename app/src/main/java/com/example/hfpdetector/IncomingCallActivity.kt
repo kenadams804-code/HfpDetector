@@ -3,18 +3,22 @@ package com.example.hfpdetector
 import android.Manifest
 import android.app.Activity
 import android.app.KeyguardManager
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.app.NotificationManagerCompat
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -26,7 +30,6 @@ class IncomingCallActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 锁屏弹出/亮屏
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -40,13 +43,11 @@ class IncomingCallActivity : Activity() {
             )
         }
 
-        // 尝试解锁（不一定成功，但不影响显示）
         if (Build.VERSION.SDK_INT >= 26) {
             getSystemService(KeyguardManager::class.java)
                 ?.requestDismissKeyguard(this, null)
         }
 
-        // 暗色背景 + 轻微 dim
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.attributes = window.attributes.apply { dimAmount = 0.55f }
 
@@ -120,10 +121,7 @@ class IncomingCallActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        val btnDecline = circleButton(
-            bgColor = "#D32F2F",
-            iconRes = android.R.drawable.ic_menu_close_clear_cancel
-        )
+        val btnDecline = circleButton("#D32F2F", android.R.drawable.ic_menu_close_clear_cancel)
         val tvDecline = TextView(this).apply {
             text = "拒绝"
             textSize = 14f
@@ -132,10 +130,7 @@ class IncomingCallActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
-        val btnAccept = circleButton(
-            bgColor = "#2E7D32",
-            iconRes = android.R.drawable.sym_action_call
-        )
+        val btnAccept = circleButton("#2E7D32", android.R.drawable.sym_action_call)
         val tvAccept = TextView(this).apply {
             text = "接听"
             textSize = 14f
@@ -146,10 +141,8 @@ class IncomingCallActivity : Activity() {
 
         leftCol.addView(btnDecline)
         leftCol.addView(tvDecline)
-
         rightCol.addView(btnAccept)
         rightCol.addView(tvAccept)
-
         bottom.addView(leftCol)
         bottom.addView(rightCol)
 
@@ -172,6 +165,16 @@ class IncomingCallActivity : Activity() {
     }
 
     private fun accept() {
+        // 1) 前台通话服务必须能发通知：通知被禁会导致系统直接杀服务/退桌面
+        val notifEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        if (!notifEnabled) {
+            AppLog.i(this, "接听失败：系统通知被禁用，无法稳定启动通话前台服务")
+            toast("请先开启 LanCall 通知，否则无法接听通话")
+            openNotificationSettings()
+            return
+        }
+
+        // 2) 麦克风权限
         if (Build.VERSION.SDK_INT >= 23 &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -183,6 +186,7 @@ class IncomingCallActivity : Activity() {
 
         val myAudioPort = Random.nextInt(46000, 46999)
 
+        // 回 ACCEPT 给有卡机
         sendControl(
             ip = invite.peerIp,
             port = invite.peerControlPort,
@@ -195,12 +199,19 @@ class IncomingCallActivity : Activity() {
 
         CoreService.stopRingingNow(this)
 
-        AudioCallService.start(
-            context = this,
-            peerIp = invite.peerIp,
-            peerAudioPort = invite.peerAudioPort,
-            myAudioPort = myAudioPort
-        )
+        // 启动通话服务（前台服务）
+        try {
+            AudioCallService.start(
+                context = this,
+                peerIp = invite.peerIp,
+                peerAudioPort = invite.peerAudioPort,
+                myAudioPort = myAudioPort
+            )
+        } catch (t: Throwable) {
+            AppLog.i(this, "启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
+            toast("启动通话失败：请检查通知权限/后台限制")
+            return
+        }
 
         CallState.incoming = null
         finish()
@@ -257,13 +268,29 @@ class IncomingCallActivity : Activity() {
             }
 
             layoutParams = LinearLayout.LayoutParams(dp(88), dp(88))
-
-            // ✅ 修正点：ScaleType 属于 ImageView.ScaleType
             scaleType = ImageView.ScaleType.CENTER
-
             isClickable = true
             isFocusable = true
         }
+    }
+
+    private fun openNotificationSettings() {
+        // 尽量跳到本 App 通知设置
+        val i = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        }
+        runCatching { startActivity(i) }
+            .onFailure {
+                // 兜底到应用详情
+                val j = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", packageName, null)
+                }
+                runCatching { startActivity(j) }
+            }
+    }
+
+    private fun toast(s: String) {
+        android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
