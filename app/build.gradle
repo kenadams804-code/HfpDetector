@@ -3,6 +3,11 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+def ksPath = System.getenv("SIGNING_KEYSTORE_PATH") ?: ""
+def ksPass = System.getenv("SIGNING_KEYSTORE_PASSWORD") ?: ""
+def ksAlias = System.getenv("SIGNING_KEY_ALIAS") ?: ""
+def keyPass = System.getenv("SIGNING_KEY_PASSWORD") ?: ""
+
 android {
     namespace 'com.example.hfpdetector'
     compileSdk 34
@@ -15,12 +20,26 @@ android {
         versionName "3.0"
     }
 
+    signingConfigs {
+        release {
+            if (ksPath) {
+                storeFile file(ksPath)
+                storePassword ksPass
+                keyAlias ksAlias
+                keyPassword keyPass
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
+            // 关键：debug 也用同一套签名，这样你装 debug 也能覆盖升级
+            signingConfig signingConfigs.release
             minifyEnabled false
         }
     }
