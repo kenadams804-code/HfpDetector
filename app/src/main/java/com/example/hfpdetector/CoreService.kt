@@ -334,121 +334,60 @@ class CoreService : Service() {
     }
 
     private fun ringAndShowIncoming(number: String) {
-        val fullScreenIntent = Intent(this, IncomingCallActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
-        val pi = PendingIntent.getActivity(
-            this, 0, fullScreenIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
-        if (!notificationsEnabled) {
-            AppLog.i(this, "接听端：通知被系统关闭 -> 尝试直接拉起来电界面")
-            try {
-                startActivity(fullScreenIntent)
-            } catch (t: Throwable) {
-                AppLog.i(this, "接听端：直接拉起来电界面失败：${t.javaClass.simpleName} ${t.message}")
-            }
-        } else {
-            try {
-                val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
-                    .setSmallIcon(android.R.drawable.sym_call_incoming)
-                    .setContentTitle("来电")
-                    .setContentText(number)
-                    .setPriority(NotificationCompat.PRIORITY_MAX)
-                    .setCategory(NotificationCompat.CATEGORY_CALL)
-                    .setFullScreenIntent(pi, true)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setAutoCancel(true)
-                    .build()
-
-                nm.notify(AppConfig.NID_INCOMING, n)
-            } catch (t: Throwable) {
-                AppLog.i(this, "接听端：发布来电通知失败：${t.javaClass.simpleName} ${t.message}")
-            }
-        }
-
-        startRinging()
+    val fullScreenIntent = Intent(this, IncomingCallActivity::class.java).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     }
+    val pi = PendingIntent.getActivity(
+        this, 0, fullScreenIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
 
-    private fun startRinging() {
+    val notificationsEnabled = androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()
+
+    val chImportance = if (Build.VERSION.SDK_INT >= 26) {
+        nm.getNotificationChannel(AppConfig.CH_CALL)?.importance
+    } else null
+
+    val canFsi = if (Build.VERSION.SDK_INT >= 34) {
         try {
-            if (ringtone?.isPlaying == true) return
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            ringtone = RingtoneManager.getRingtone(this, uri).apply {
-                if (Build.VERSION.SDK_INT >= 21) {
-                    audioAttributes = AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                }
-                play()
-            }
-        } catch (_: Throwable) {}
-        startVibrateLoop()
-    }
-
-    private fun stopRinging() {
-        try { ringtone?.stop() } catch (_: Throwable) {}
-        ringtone = null
-        stopVibrate()
-        nm.cancel(AppConfig.NID_INCOMING)
-    }
-
-    private fun getSystemVibrator(): Vibrator? {
-        return try {
-            if (Build.VERSION.SDK_INT >= 31) {
-                getSystemService(VibratorManager::class.java)?.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-            }
+            nm.canUseFullScreenIntent()
         } catch (_: Throwable) {
-            null
+            true
         }
-    }
+    } else true
 
-    private fun startVibrateLoop() {
-        try {
-            val v = vibrator ?: return
-            if (!v.hasVibrator()) return
-            val pattern = longArrayOf(0, 450, 350, 450, 1100)
-            if (Build.VERSION.SDK_INT >= 26) {
-                v.vibrate(VibrationEffect.createWaveform(pattern, 0))
-            } else {
-                @Suppress("DEPRECATION")
-                v.vibrate(pattern, 0)
-            }
-        } catch (_: Throwable) {}
-    }
+    AppLog.i(
+        this,
+        "来电弹窗检查：notifEnabled=$notificationsEnabled channelImportance=$chImportance canUseFullScreenIntent=$canFsi"
+    )
 
-    private fun stopVibrate() {
-        try { vibrator?.cancel() } catch (_: Throwable) {}
-    }
-
-    private fun buildPersistNotification(): Notification {
-        val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("LanCall")
-            .setContentText("正在后台运行")
-            .setOngoing(true)
-            .setContentIntent(open)
+    // 先发通知（全屏弹窗主要依赖这一步）
+    try {
+        val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setContentTitle("来电")
+            .setContentText(number)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setFullScreenIntent(pi, true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setAutoCancel(true)
             .build()
+
+        nm.notify(AppConfig.NID_INCOMING, n)
+        AppLog.i(this, "已发送来电通知（含FullScreenIntent）")
+    } catch (t: Throwable) {
+        AppLog.i(this, "发送来电通知失败：${t.javaClass.simpleName} ${t.message}")
     }
 
-    private fun createChannels() {
-        if (Build.VERSION.SDK_INT < 26) return
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
-        )
-        // 这里用新的 CH_CALL（v2），系统会重新创建一个高重要性通道
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
-        )
+    // 尝试直接拉起 Activity（有些 ROM 会禁止后台拉起，这一步可能无效，也可能不报错）
+    try {
+        startActivity(fullScreenIntent)
+        AppLog.i(this, "已尝试直接 startActivity 拉起来电界面")
+    } catch (t: Throwable) {
+        AppLog.i(this, "startActivity 拉起失败：${t.javaClass.simpleName} ${t.message}")
     }
+
+    // 不管弹不弹，全都响铃/震动（你现在看到的震动就是这里）
+    startRinging()
 }
