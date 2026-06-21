@@ -33,6 +33,7 @@ class CoreService : Service() {
         private const val ACTION_STOP = "CoreService.STOP"
         private const val ACTION_INCOMING_PSTN = "CoreService.INCOMING_PSTN"
         private const val ACTION_STOP_RING = "CoreService.STOP_RING"
+        private const val ACTION_TEST_INVITE = "CoreService.TEST_INVITE"
 
         fun start(context: Context) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_START)
@@ -54,6 +55,12 @@ class CoreService : Service() {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_STOP_RING)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
         }
+
+        /** 有卡机：发送一条“测试来电 INVITE”到无卡机，用来验证链路 */
+        fun sendTestInvite(context: Context) {
+            val i = Intent(context, CoreService::class.java).setAction(ACTION_TEST_INVITE)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
+        }
     }
 
     private lateinit var nm: NotificationManager
@@ -71,7 +78,6 @@ class CoreService : Service() {
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
 
-    // 节流日志（避免每2秒刷爆）
     private var lastPongLogTs: Long = 0
     private var lastPingSendLogTs: Long = 0
 
@@ -114,7 +120,12 @@ class CoreService : Service() {
             ACTION_INCOMING_PSTN -> {
                 val num = intent.getStringExtra("number") ?: "未知号码"
                 AppLog.i(this, "收到系统来电回调：$num")
-                handleIncomingPstn(num)
+                handleInviteSend(number = num, isTest = false)
+            }
+
+            ACTION_TEST_INVITE -> {
+                AppLog.i(this, "手动触发：发送测试 INVITE")
+                handleInviteSend(number = "测试来电", isTest = true)
             }
         }
         return START_STICKY
@@ -236,7 +247,6 @@ class CoreService : Service() {
             "PING" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val pong = JSONObject().put("type", "PONG").put("t", obj.optLong("t", System.currentTimeMillis()))
-                // 回复到来源端口（关键）
                 sendJson(fromIp, fromPort, pong)
             }
 
@@ -249,7 +259,6 @@ class CoreService : Service() {
                 }
             }
 
-            // 日志页一键测试
             "PING_TEST" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val nonce = obj.optString("nonce", "")
@@ -322,8 +331,12 @@ class CoreService : Service() {
         } catch (_: Throwable) {}
     }
 
-    private fun handleIncomingPstn(number: String) {
-        if (!isHasSimReady()) return
+    /** 统一的 INVITE 发送（真实来电 / 测试来电都走这里） */
+    private fun handleInviteSend(number: String, isTest: Boolean) {
+        if (!isHasSimReady()) {
+            AppLog.i(this, "本机不是有卡端，忽略发送 INVITE")
+            return
+        }
 
         applyManualPairIfEnabled()
         val peer = peerIp
@@ -342,9 +355,10 @@ class CoreService : Service() {
             .put("number", number)
             .put("audioPort", myAudioPort)
             .put("controlPort", AppConfig.CONTROL_PORT)
+            .put("test", isTest)
 
         sendJson(peer, peerControlPort, obj)
-        AppLog.i(this, "有卡端：发送 INVITE -> ${peer.hostAddress} 号码=$number")
+        AppLog.i(this, "有卡端：发送 INVITE -> ${peer.hostAddress} 号码=$number test=$isTest")
     }
 
     private fun ringAndShowIncoming(number: String) {
