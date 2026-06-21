@@ -4,8 +4,9 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.telephony.TelephonyManager
-import android.view.Gravity
 import android.view.View
 import android.widget.*
 
@@ -14,11 +15,33 @@ class MainActivity : Activity() {
     private lateinit var modeAdapter: ModeAdapter
     private var lastGoodSelection = 0
 
+    private lateinit var tip: TextView
+    private lateinit var spinner: Spinner
+    private lateinit var swService: Switch
+    private lateinit var swSilence: Switch
+
+    private lateinit var btnSettings: Button
+    private lateinit var btnPair: Button
+    private lateinit var btnShowQr: Button
+    private lateinit var btnLog: Button
+    private lateinit var btnSms: Button
+    private lateinit var btnCalls: Button
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val refreshRunnable = object : Runnable {
+        override fun run() {
+            refresh()
+            mainHandler.postDelayed(this, 1200)
+        }
+    }
+
+    private var hasSim: Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val tm = getSystemService(TelephonyManager::class.java)
-        val hasSim = tm?.simState == TelephonyManager.SIM_STATE_READY
+        hasSim = tm?.simState == TelephonyManager.SIM_STATE_READY
 
         val title = TextView(this).apply {
             text = "LanCall"
@@ -26,75 +49,69 @@ class MainActivity : Activity() {
             setPadding(40, 40, 40, 10)
         }
 
-        val tip = TextView(this).apply {
+        tip = TextView(this).apply {
             textSize = 14f
             setPadding(40, 0, 40, 20)
             setTextColor(Color.DKGRAY)
         }
 
         // 模式下拉框（两项永远显示）
-        val spinner = Spinner(this)
-        modeAdapter = ModeAdapter(
-            this,
-            listOf("局域网模式（LAN）", "蓝牙耳机模式（BT）")
-        )
+        spinner = Spinner(this)
+        modeAdapter = ModeAdapter(this, listOf("局域网模式（LAN）", "蓝牙耳机模式（BT）"))
         spinner.adapter = modeAdapter
 
         val currentMode = Prefs.getMode(this)
         lastGoodSelection = if (currentMode == "BT") 1 else 0
         spinner.setSelection(lastGoodSelection)
 
-        // 常驻服务开关 + 图标颜色（简单版：文字+Switch；你要更像系统设置样式可以下一步再美化）
-        val swService = Switch(this).apply {
+        // 常驻服务开关
+        swService = Switch(this).apply {
             text = "常驻服务（开=后台工作）"
             isChecked = Prefs.isServiceEnabled(this@MainActivity)
         }
 
-        val swSilence = Switch(this).apply {
+        // 有卡机静音开关
+        swSilence = Switch(this).apply {
             text = "（仅有卡机）来电尽量静音（主要无卡机响）"
             isChecked = Prefs.isSilencePstn(this@MainActivity)
             visibility = if (hasSim) View.VISIBLE else View.GONE
         }
 
-        val btnSettings = Button(this).apply { text = "设置（授权/检测/系统跳转）" }
-        val btnSms = Button(this).apply { text = "短信箱（App内）" }
-        val btnCalls = Button(this).apply { text = "通话记录（App内）" }
+        btnSettings = Button(this).apply { text = "设置（授权/检测/系统跳转）" }
+        btnPair = Button(this).apply { text = "配对（有卡机：填IP/扫码）" }
+        btnShowQr = Button(this).apply { text = "显示二维码（无卡机）" }
+        btnLog = Button(this).apply { text = "系统日志（连通性测试/导出诊断包）" }
+
+        btnSms = Button(this).apply { text = "短信箱（App内）" }
+        btnCalls = Button(this).apply { text = "通话记录（App内）" }
+
+        // 有卡机显示配对按钮；无卡机显示二维码按钮
+        btnPair.visibility = if (hasSim) View.VISIBLE else View.GONE
+        btnShowQr.visibility = if (hasSim) View.GONE else View.VISIBLE
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(title)
             addView(tip)
+
             addView(TextView(this@MainActivity).apply {
                 text = "当前模式："
                 setPadding(40, 0, 40, 0)
             })
             addView(spinner)
+
             addView(swService)
             addView(swSilence)
+
             addView(btnSettings)
+            addView(btnPair)
+            addView(btnShowQr)
+            addView(btnLog)
+
             addView(btnSms)
             addView(btnCalls)
         }
         setContentView(root)
-
-        fun refresh() {
-            val serviceOn = Prefs.isServiceEnabled(this)
-            val connected = ConnectionState.isConnected(this)
-            val hfp = Prefs.getHfpSupport(this) == "YES"
-
-            // 规则：未连接 -> 两个都灰
-            // 已连接 -> LAN 可用；BT 需 HFP=YES 才可用
-            modeAdapter.enableLan = serviceOn && connected
-            modeAdapter.enableBt = serviceOn && connected && hfp
-            modeAdapter.notifyDataSetChanged()
-
-            tip.text = buildString {
-                append("本机：${if (hasSim) "有卡手机" else "无卡手机"}\n")
-                append("连接状态：${if (connected) "已连接/已配对" else "未连接（请先配对）"}\n")
-                append("蓝牙耳机模式支持：${Prefs.getHfpSupport(this@MainActivity)}\n")
-                append("提示：短信/通话记录像 WhatsApp 一样独立在 App 内。")
-            }
-        }
 
         swService.setOnCheckedChangeListener { _, checked ->
             Prefs.setServiceEnabled(this, checked)
@@ -110,31 +127,80 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val allow = modeAdapter.isEnabled(position)
                 if (!allow) {
-                    // 不能选：弹提示并回退
                     Toast.makeText(this@MainActivity, "当前不可用：请先配对/或蓝牙不支持", Toast.LENGTH_SHORT).show()
                     spinner.setSelection(lastGoodSelection)
                     return
                 }
-
                 lastGoodSelection = position
                 Prefs.setMode(this@MainActivity, if (position == 1) "BT" else "LAN")
+                refresh()
             }
+
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
 
         btnSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
+        btnPair.setOnClickListener { startActivity(Intent(this, PairingActivity::class.java)) }
+        btnShowQr.setOnClickListener { startActivity(Intent(this, ShowQrActivity::class.java)) }
+        btnLog.setOnClickListener { startActivity(Intent(this, LogActivity::class.java)) }
 
         btnSms.setOnClickListener {
-            // 你若已有 SmsListActivity 就跳过去；没有就先别点
             runCatching { startActivity(Intent(this, Class.forName("com.example.hfpdetector.SmsListActivity"))) }
+                .onFailure { Toast.makeText(this, "短信箱页面尚未加入/类名不匹配", Toast.LENGTH_SHORT).show() }
         }
         btnCalls.setOnClickListener {
             runCatching { startActivity(Intent(this, Class.forName("com.example.hfpdetector.CallLogActivity"))) }
+                .onFailure { Toast.makeText(this, "通话记录页面尚未加入/类名不匹配", Toast.LENGTH_SHORT).show() }
         }
 
         // 默认根据开关决定是否启动
         if (Prefs.isServiceEnabled(this)) CoreService.start(this)
 
         refresh()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 周期刷新（连接状态/灰掉逻辑会随 PING/PONG 变化）
+        mainHandler.removeCallbacks(refreshRunnable)
+        mainHandler.post(refreshRunnable)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        mainHandler.removeCallbacks(refreshRunnable)
+    }
+
+    private fun refresh() {
+        val serviceOn = Prefs.isServiceEnabled(this)
+        val connected = ConnectionState.isConnected(this)
+        val hfpYes = Prefs.getHfpSupport(this) == "YES"
+
+        // 灰掉规则：
+        // 1) 服务必须开
+        // 2) 必须“真连接”(最近10秒收到对端响应)
+        // 3) BT 还要 HFP=YES
+        modeAdapter.enableLan = serviceOn && connected
+        modeAdapter.enableBt = serviceOn && connected && hfpYes
+        modeAdapter.notifyDataSetChanged()
+
+        val localIp = runCatching { NetUtils.getLocalWifiIp(this) }.getOrDefault("")
+        val seenAgoSec = run {
+            val ts = Prefs.getPeerSeenTs(this)
+            if (ts <= 0) -1 else ((System.currentTimeMillis() - ts) / 1000).toInt()
+        }
+
+        tip.text = buildString {
+            append("本机：${if (hasSim) "有卡手机" else "无卡手机"}\n")
+            append("常驻服务：${if (serviceOn) "开" else "关"}\n")
+            append("连接状态：${if (connected) "已连接" else "未连接"}")
+            if (seenAgoSec >= 0) append("（$seenAgoSec 秒前）")
+            append("\n")
+            append("对端IP(保存)：${Prefs.getPeerIp(this@MainActivity).ifBlank { "(空)" }}\n")
+            append("对端IP(最近看到)：${Prefs.getPeerSeenIp(this@MainActivity).ifBlank { "(空)" }}\n")
+            append("本机Wi‑Fi IP：${if (localIp.isBlank()) "(未获取到)" else localIp}\n")
+            append("蓝牙耳机模式支持：${Prefs.getHfpSupport(this@MainActivity)}\n")
+            append("提示：日志页里可一键“连通性测试/导出诊断包”。")
+        }
     }
 }
