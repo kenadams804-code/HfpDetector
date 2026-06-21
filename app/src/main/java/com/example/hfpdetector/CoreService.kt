@@ -78,8 +78,9 @@ class CoreService : Service() {
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
 
+    // 节流日志，避免刷屏
     private var lastPongLogTs: Long = 0
-    private var lastPingSendLogTs: Long = 0
+    private var lastPingLogTs: Long = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -97,9 +98,20 @@ class CoreService : Service() {
         }
     }
 
+    override fun onDestroy() {
+        running = false
+        try { socket?.close() } catch (_: Throwable) {}
+        try { multicastLock?.release() } catch (_: Throwable) {}
+        stopRinging()
+        AppLog.i(this, "CoreService 销毁")
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> {}
+            ACTION_START -> { /* no-op */ }
 
             ACTION_STOP -> {
                 AppLog.i(this, "CoreService 停止")
@@ -131,17 +143,6 @@ class CoreService : Service() {
         return START_STICKY
     }
 
-    override fun onDestroy() {
-        running = false
-        try { socket?.close() } catch (_: Throwable) {}
-        try { multicastLock?.release() } catch (_: Throwable) {}
-        stopRinging()
-        AppLog.i(this, "CoreService 销毁")
-        super.onDestroy()
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
     private fun isHasSimReady(): Boolean {
         val tm = getSystemService(TelephonyManager::class.java)
         return tm?.simState == TelephonyManager.SIM_STATE_READY
@@ -150,8 +151,9 @@ class CoreService : Service() {
     private fun startNetworking() {
         socket = DatagramSocket(AppConfig.CONTROL_PORT).apply { broadcast = true }
 
+        // 接收线程
         thread(name = "ctrl-recv") {
-            val buf = ByteArray(4096)
+            val buf = ByteArray(8192)
             while (running) {
                 try {
                     val p = DatagramPacket(buf, buf.size)
@@ -163,6 +165,7 @@ class CoreService : Service() {
         }
 
         if (!isHasSimReady()) {
+            // 无卡机：广播 HELLO 供发现
             acquireMulticast()
             startHelloBroadcast()
             AppLog.i(this, "接听端：开始广播 HELLO")
@@ -194,8 +197,8 @@ class CoreService : Service() {
                         sendJson(peer, peerControlPort, obj)
 
                         val now = System.currentTimeMillis()
-                        if (now - lastPingSendLogTs > 10_000) {
-                            lastPingSendLogTs = now
+                        if (now - lastPingLogTs > 10_000) {
+                            lastPingLogTs = now
                             AppLog.i(this, "有卡端：发送 PING -> ${peer.hostAddress}")
                         }
                     }
@@ -233,7 +236,15 @@ class CoreService : Service() {
 
     private fun onControlMessage(msg: String, fromIp: InetAddress, fromPort: Int) {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
+
         when (obj.optString("type")) {
+            "HELLO" -> {
+                if (isHasSimReady() && !Prefs.isManualPairEnabled(this)) {
+                    peerIp = fromIp
+                    peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
+                    Prefs.markPeerSeen(this, fromIp.hostAddress)
+                }
+            }
 
             "PING" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
@@ -250,6 +261,18 @@ class CoreService : Service() {
                 }
             }
 
+            "PING_TEST" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val nonce = obj.optString("nonce", "")
+                val resp = JSONObject().put("type", "PONG_TEST").put("nonce", nonce)
+                sendJson(fromIp, fromPort, resp)
+                AppLog.i(this, "收到 PING_TEST，已回复 PONG_TEST -> ${fromIp.hostAddress}:$fromPort")
+            }
+
+            /**
+             * ✅ INVITE：收到就处理（不依赖 simState），并回 ACK
+             * ACK 回两个端口：fromPort + senderCtrlPort，排除“回错端口”
+             */
             "INVITE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
 
@@ -264,7 +287,6 @@ class CoreService : Service() {
                     .put("callId", cid)
                     .put("test", isTest)
 
-                // 回ACK到两个端口
                 sendJson(fromIp, fromPort, ack)
                 sendJson(fromIp, senderCtrlPort, ack)
 
@@ -277,6 +299,7 @@ class CoreService : Service() {
                 )
 
                 AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
+
                 stopRinging()
                 ringAndShowIncoming(number)
             }
@@ -285,6 +308,8 @@ class CoreService : Service() {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
+
+            // 其它类型（你项目里已有 ACCEPT/HANGUP/DECLINE 可继续加回，这里不影响弹窗链路）
         }
     }
 
@@ -296,6 +321,9 @@ class CoreService : Service() {
         } catch (_: Throwable) {}
     }
 
+    /**
+     * ✅ INVITE 发送：后台线程 + 重发3次（避免 UDP 单包丢失）
+     */
     private fun handleInviteSend(number: String, isTest: Boolean) {
         if (!isHasSimReady()) {
             AppLog.i(this, "本机不是有卡端，忽略发送 INVITE")
@@ -322,7 +350,6 @@ class CoreService : Service() {
                 .put("controlPort", AppConfig.CONTROL_PORT)
                 .put("test", isTest)
 
-            // 重发 3 次
             val delays = longArrayOf(0, 120, 300)
             for (d in delays) {
                 try { Thread.sleep(d) } catch (_: Throwable) {}
@@ -333,61 +360,131 @@ class CoreService : Service() {
         }
     }
 
+    /**
+     * 来电弹窗：先发 FullScreen 通知，再尝试 startActivity。
+     * 你现在看到“震动但不弹窗”，多数是 ROM/通知通道策略导致 FullScreen 不触发。
+     * 这里把关键状态写入日志，便于判断原因。
+     */
     private fun ringAndShowIncoming(number: String) {
-    val fullScreenIntent = Intent(this, IncomingCallActivity::class.java).apply {
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-    }
-    val pi = PendingIntent.getActivity(
-        this, 0, fullScreenIntent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-
-    val notificationsEnabled = androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()
-
-    val chImportance = if (Build.VERSION.SDK_INT >= 26) {
-        nm.getNotificationChannel(AppConfig.CH_CALL)?.importance
-    } else null
-
-    val canFsi = if (Build.VERSION.SDK_INT >= 34) {
-        try {
-            nm.canUseFullScreenIntent()
-        } catch (_: Throwable) {
-            true
+        val fullScreenIntent = Intent(this, IncomingCallActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
-    } else true
+        val pi = PendingIntent.getActivity(
+            this, 0, fullScreenIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
-    AppLog.i(
-        this,
-        "来电弹窗检查：notifEnabled=$notificationsEnabled channelImportance=$chImportance canUseFullScreenIntent=$canFsi"
-    )
+        val notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        val chImportance = if (Build.VERSION.SDK_INT >= 26) nm.getNotificationChannel(AppConfig.CH_CALL)?.importance else null
+        val canFsi = if (Build.VERSION.SDK_INT >= 34) {
+            try { nm.canUseFullScreenIntent() } catch (_: Throwable) { true }
+        } else true
 
-    // 先发通知（全屏弹窗主要依赖这一步）
-    try {
-        val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
-            .setSmallIcon(android.R.drawable.sym_call_incoming)
-            .setContentTitle("来电")
-            .setContentText(number)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setFullScreenIntent(pi, true)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setAutoCancel(true)
+        AppLog.i(this, "来电弹窗检查：notifEnabled=$notificationsEnabled channelImportance=$chImportance canUseFullScreenIntent=$canFsi")
+
+        try {
+            val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
+                .setSmallIcon(android.R.drawable.sym_call_incoming)
+                .setContentTitle("来电")
+                .setContentText(number)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setFullScreenIntent(pi, true)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setAutoCancel(true)
+                .build()
+            nm.notify(AppConfig.NID_INCOMING, n)
+            AppLog.i(this, "已发送来电通知（含FullScreenIntent）")
+        } catch (t: Throwable) {
+            AppLog.i(this, "发送来电通知失败：${t.javaClass.simpleName} ${t.message}")
+        }
+
+        try {
+            startActivity(fullScreenIntent)
+            AppLog.i(this, "已尝试直接 startActivity 拉起来电界面")
+        } catch (t: Throwable) {
+            AppLog.i(this, "startActivity 拉起失败：${t.javaClass.simpleName} ${t.message}")
+        }
+
+        startRinging()
+    }
+
+    private fun startRinging() {
+        try {
+            if (ringtone?.isPlaying == true) return
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            ringtone = RingtoneManager.getRingtone(this, uri).apply {
+                if (Build.VERSION.SDK_INT >= 21) {
+                    audioAttributes = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                }
+                play()
+            }
+        } catch (_: Throwable) {}
+        startVibrateLoop()
+    }
+
+    private fun stopRinging() {
+        try { ringtone?.stop() } catch (_: Throwable) {}
+        ringtone = null
+        stopVibrate()
+        nm.cancel(AppConfig.NID_INCOMING)
+    }
+
+    private fun getSystemVibrator(): Vibrator? {
+        return try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                getSystemService(VibratorManager::class.java)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun startVibrateLoop() {
+        try {
+            val v = vibrator ?: return
+            if (!v.hasVibrator()) return
+            val pattern = longArrayOf(0, 450, 350, 450, 1100)
+            if (Build.VERSION.SDK_INT >= 26) {
+                v.vibrate(VibrationEffect.createWaveform(pattern, 0))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(pattern, 0)
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun stopVibrate() {
+        try { vibrator?.cancel() } catch (_: Throwable) {}
+    }
+
+    private fun buildPersistNotification(): Notification {
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setContentTitle("LanCall")
+            .setContentText("正在后台运行")
+            .setOngoing(true)
+            .setContentIntent(open)
             .build()
-
-        nm.notify(AppConfig.NID_INCOMING, n)
-        AppLog.i(this, "已发送来电通知（含FullScreenIntent）")
-    } catch (t: Throwable) {
-        AppLog.i(this, "发送来电通知失败：${t.javaClass.simpleName} ${t.message}")
     }
 
-    // 尝试直接拉起 Activity（有些 ROM 会禁止后台拉起，这一步可能无效，也可能不报错）
-    try {
-        startActivity(fullScreenIntent)
-        AppLog.i(this, "已尝试直接 startActivity 拉起来电界面")
-    } catch (t: Throwable) {
-        AppLog.i(this, "startActivity 拉起失败：${t.javaClass.simpleName} ${t.message}")
+    private fun createChannels() {
+        if (Build.VERSION.SDK_INT < 26) return
+        nm.createNotificationChannel(
+            NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
+        )
     }
-
-    // 不管弹不弹，全都响铃/震动（你现在看到的震动就是这里）
-    startRinging()
 }
