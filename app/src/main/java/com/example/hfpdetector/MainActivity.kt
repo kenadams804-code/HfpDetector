@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.telephony.TelephonyManager
+import android.view.Gravity
 import android.view.View
 import android.widget.*
 
@@ -17,7 +18,10 @@ class MainActivity : Activity() {
 
     private lateinit var tip: TextView
     private lateinit var spinner: Spinner
+
     private lateinit var swService: Switch
+    private lateinit var ivService: ImageView
+
     private lateinit var swSilence: Switch
 
     private lateinit var btnSettings: Button
@@ -64,13 +68,18 @@ class MainActivity : Activity() {
         lastGoodSelection = if (currentMode == "BT") 1 else 0
         spinner.setSelection(lastGoodSelection)
 
-        // 常驻服务开关
-        swService = Switch(this).apply {
-            text = "常驻服务（开=后台工作）"
-            isChecked = Prefs.isServiceEnabled(this@MainActivity)
-        }
+        // ===== 常驻服务：设置风格一行（图标变色 + 右侧Switch）=====
+        val (rowService, serviceSwitch, serviceIcon) = makeSettingSwitchRow(
+            iconRes = android.R.drawable.ic_popup_sync, // 系统自带图标
+            title = "常驻服务",
+            subtitle = "开=后台工作（来电/连接可用）"
+        )
+        swService = serviceSwitch
+        ivService = serviceIcon
+        swService.isChecked = Prefs.isServiceEnabled(this)
+        updateServiceIconColor(swService.isChecked)
 
-        // 有卡机静音开关
+        // 有卡机静音开关（普通 Switch 即可）
         swSilence = Switch(this).apply {
             text = "（仅有卡机）来电尽量静音（主要无卡机响）"
             isChecked = Prefs.isSilencePstn(this@MainActivity)
@@ -85,7 +94,6 @@ class MainActivity : Activity() {
         btnSms = Button(this).apply { text = "短信箱（App内）" }
         btnCalls = Button(this).apply { text = "通话记录（App内）" }
 
-        // 有卡机显示配对按钮；无卡机显示二维码按钮
         btnPair.visibility = if (hasSim) View.VISIBLE else View.GONE
         btnShowQr.visibility = if (hasSim) View.GONE else View.VISIBLE
 
@@ -100,7 +108,7 @@ class MainActivity : Activity() {
             })
             addView(spinner)
 
-            addView(swService)
+            addView(rowService)
             addView(swSilence)
 
             addView(btnSettings)
@@ -115,6 +123,7 @@ class MainActivity : Activity() {
 
         swService.setOnCheckedChangeListener { _, checked ->
             Prefs.setServiceEnabled(this, checked)
+            updateServiceIconColor(checked)
             if (checked) CoreService.start(this) else CoreService.stop(this)
             refresh()
         }
@@ -161,7 +170,6 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // 周期刷新（连接状态/灰掉逻辑会随 PING/PONG 变化）
         mainHandler.removeCallbacks(refreshRunnable)
         mainHandler.post(refreshRunnable)
     }
@@ -176,10 +184,6 @@ class MainActivity : Activity() {
         val connected = ConnectionState.isConnected(this)
         val hfpYes = Prefs.getHfpSupport(this) == "YES"
 
-        // 灰掉规则：
-        // 1) 服务必须开
-        // 2) 必须“真连接”(最近10秒收到对端响应)
-        // 3) BT 还要 HFP=YES
         modeAdapter.enableLan = serviceOn && connected
         modeAdapter.enableBt = serviceOn && connected && hfpYes
         modeAdapter.notifyDataSetChanged()
@@ -203,4 +207,65 @@ class MainActivity : Activity() {
             append("提示：日志页里可一键“连通性测试/导出诊断包”。")
         }
     }
+
+    private fun updateServiceIconColor(on: Boolean) {
+        // 开=绿色，关=灰色（你也可以改成更亮的绿色）
+        ivService.setColorFilter(Color.parseColor(if (on) "#2E7D32" else "#9E9E9E"))
+    }
+
+    /**
+     * 生成一条“设置风格”的行：左图标 + 两行文字 + 右侧Switch
+     * 返回 Triple(row, switch, icon)
+     */
+    private fun makeSettingSwitchRow(
+        iconRes: Int,
+        title: String,
+        subtitle: String
+    ): Triple<View, Switch, ImageView> {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(40, 22, 40, 22)
+        }
+
+        val icon = ImageView(this).apply {
+            setImageResource(iconRes)
+            layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                rightMargin = dp(14)
+            }
+        }
+
+        val textBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val tvTitle = TextView(this).apply {
+            text = title
+            textSize = 16f
+            setTextColor(Color.parseColor("#111111"))
+        }
+
+        val tvSub = TextView(this).apply {
+            text = subtitle
+            textSize = 12f
+            setTextColor(Color.parseColor("#666666"))
+        }
+
+        textBox.addView(tvTitle)
+        textBox.addView(tvSub)
+
+        val sw = Switch(this)
+
+        // 点击整行也切换开关（更像系统设置）
+        row.setOnClickListener { sw.isChecked = !sw.isChecked }
+
+        row.addView(icon)
+        row.addView(textBox)
+        row.addView(sw)
+
+        return Triple(row, sw, icon)
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 }
