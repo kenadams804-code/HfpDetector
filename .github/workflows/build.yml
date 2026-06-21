@@ -51,8 +51,12 @@ jobs:
 
       - name: Decode keystore
         run: |
-          echo "$SIGNING_KEYSTORE_B64" | base64 -d > keystore.jks
+          printf '%s' "$SIGNING_KEYSTORE_B64" | base64 -d > keystore.jks
           echo "SIGNING_KEYSTORE_PATH=$GITHUB_WORKSPACE/keystore.jks" >> $GITHUB_ENV
+      
+      - name: Verify keystore readable
+        run: |
+          keytool -list -keystore keystore.jks -storetype JKS -storepass "$SIGNING_KEYSTORE_PASSWORD" | head -n 30
 
       - name: Build APK (debug + release)
         run: |
