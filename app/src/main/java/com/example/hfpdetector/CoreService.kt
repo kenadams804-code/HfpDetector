@@ -71,13 +71,16 @@ class CoreService : Service() {
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
 
+    // 节流日志（避免每2秒刷爆）
+    private var lastPongLogTs: Long = 0
+    private var lastPingSendLogTs: Long = 0
+
     override fun onCreate() {
         super.onCreate()
         nm = getSystemService(NotificationManager::class.java)
         vibrator = getSystemVibrator()
         createChannels()
 
-        // 通知栏：只显示固定信息
         startForeground(AppConfig.NID_PERSIST, buildPersistNotification())
 
         AppLog.i(this, "CoreService 启动")
@@ -90,12 +93,10 @@ class CoreService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> {
-                // no-op
-            }
+            ACTION_START -> {}
 
             ACTION_STOP -> {
-                AppLog.i(this, "CoreService 收到停止指令")
+                AppLog.i(this, "CoreService 停止")
                 stopRinging()
                 running = false
                 try { socket?.close() } catch (_: Throwable) {}
@@ -138,7 +139,6 @@ class CoreService : Service() {
     private fun startNetworking() {
         socket = DatagramSocket(AppConfig.CONTROL_PORT).apply { broadcast = true }
 
-        // 接收线程
         thread(name = "ctrl-recv") {
             val buf = ByteArray(4096)
             while (running) {
@@ -146,19 +146,17 @@ class CoreService : Service() {
                     val p = DatagramPacket(buf, buf.size)
                     socket?.receive(p) ?: continue
                     val msg = String(p.data, 0, p.length, Charsets.UTF_8)
-                    onControlMessage(msg, p.address)
+                    onControlMessage(msg, p.address, p.port)
                 } catch (_: Throwable) {}
             }
         }
 
         if (!isHasSimReady()) {
-            // 无卡机：receiver 广播“我在线”（用于自动发现）
             acquireMulticast()
             startHelloBroadcast()
-            AppLog.i(this, "接听端：开始广播 HELLO 供有卡机发现")
+            AppLog.i(this, "接听端：开始广播 HELLO")
         } else {
-            AppLog.i(this, "有卡端：等待发现接听端（或使用手动配对）")
-            // 有卡端：启动 PING 心跳，用于判断“是否真的连上对端”
+            AppLog.i(this, "有卡端：启动 PING 心跳")
             startPingLoop()
         }
     }
@@ -170,10 +168,7 @@ class CoreService : Service() {
             try {
                 peerIp = InetAddress.getByName(ip)
                 peerControlPort = AppConfig.CONTROL_PORT
-                AppLog.i(this, "有卡端：启用手动配对 peerIp=$ip")
-            } catch (t: Throwable) {
-                AppLog.i(this, "有卡端：手动配对 IP 无效：$ip err=${t.message}")
-            }
+            } catch (_: Throwable) {}
         }
     }
 
@@ -181,15 +176,17 @@ class CoreService : Service() {
         thread(name = "ping-loop") {
             while (running) {
                 try {
-                    // 每次循环都刷新一次手动配对配置（你在设置里改了不用重启服务）
                     applyManualPairIfEnabled()
-
                     val peer = peerIp
                     if (peer != null) {
-                        val obj = JSONObject()
-                            .put("type", "PING")
-                            .put("t", System.currentTimeMillis())
+                        val obj = JSONObject().put("type", "PING").put("t", System.currentTimeMillis())
                         sendJson(peer, peerControlPort, obj)
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastPingSendLogTs > 10_000) {
+                            lastPingSendLogTs = now
+                            AppLog.i(this, "有卡端：发送 PING -> ${peer.hostAddress}")
+                        }
                     }
                 } catch (_: Throwable) {}
                 Thread.sleep(2000)
@@ -223,38 +220,47 @@ class CoreService : Service() {
         }
     }
 
-    private fun onControlMessage(msg: String, fromIp: InetAddress) {
+    private fun onControlMessage(msg: String, fromIp: InetAddress, fromPort: Int) {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
         when (obj.optString("type")) {
 
             "HELLO" -> {
-                // 自动发现：只有在“未启用手动配对”时才更新 peer
                 if (isHasSimReady() && !Prefs.isManualPairEnabled(this)) {
                     peerIp = fromIp
                     peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
-                    Prefs.markPeerSeen(this, fromIp.hostAddress) // ✅ 连接状态更新
+                    Prefs.markPeerSeen(this, fromIp.hostAddress)
                     AppLog.i(this, "有卡端：自动发现接听端 $fromIp")
                 }
             }
 
             "PING" -> {
-                // 无卡端收到 PING -> 回 PONG（用于有卡端判断在线）
-                Prefs.markPeerSeen(this, fromIp.hostAddress) // ✅ 连接状态更新
-                val pong = JSONObject()
-                    .put("type", "PONG")
-                    .put("t", obj.optLong("t", System.currentTimeMillis()))
-                sendJson(fromIp, AppConfig.CONTROL_PORT, pong)
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val pong = JSONObject().put("type", "PONG").put("t", obj.optLong("t", System.currentTimeMillis()))
+                // 回复到来源端口（关键）
+                sendJson(fromIp, fromPort, pong)
             }
 
             "PONG" -> {
-                // 有卡端收到 PONG -> 标记对端在线
-                Prefs.markPeerSeen(this, fromIp.hostAddress) // ✅ 连接状态更新
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val now = System.currentTimeMillis()
+                if (now - lastPongLogTs > 10_000) {
+                    lastPongLogTs = now
+                    AppLog.i(this, "有卡端：收到 PONG <- ${fromIp.hostAddress}")
+                }
+            }
+
+            // 日志页一键测试
+            "PING_TEST" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val nonce = obj.optString("nonce", "")
+                val resp = JSONObject().put("type", "PONG_TEST").put("nonce", nonce)
+                sendJson(fromIp, fromPort, resp)
+                AppLog.i(this, "收到 PING_TEST，已回复 PONG_TEST -> ${fromIp.hostAddress}:$fromPort")
             }
 
             "INVITE" -> {
-                // receiver 收到邀请 -> 弹无卡机来电界面
                 if (!isHasSimReady()) {
-                    Prefs.markPeerSeen(this, fromIp.hostAddress) // ✅ 连接状态更新
+                    Prefs.markPeerSeen(this, fromIp.hostAddress)
 
                     val number = obj.optString("number", "未知号码")
                     val cid = obj.optString("callId", UUID.randomUUID().toString())
@@ -276,9 +282,8 @@ class CoreService : Service() {
             }
 
             "ACCEPT" -> {
-                // sender 收到对方接受 -> 开始音频
                 if (isHasSimReady()) {
-                    Prefs.markPeerSeen(this, fromIp.hostAddress) // ✅ 连接状态更新
+                    Prefs.markPeerSeen(this, fromIp.hostAddress)
 
                     val cid = obj.optString("callId", "")
                     val receiverAudioPort = obj.optInt("audioPort", 0)
@@ -297,12 +302,12 @@ class CoreService : Service() {
             }
 
             "DECLINE" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress) // ✅ 连接状态更新
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
                 if (isHasSimReady()) AppLog.i(this, "有卡端：对方拒绝")
             }
 
             "HANGUP" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress) // ✅ 连接状态更新
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
                 AudioCallService.stop(this)
                 AppLog.i(this, "通话挂断")
             }
@@ -320,12 +325,10 @@ class CoreService : Service() {
     private fun handleIncomingPstn(number: String) {
         if (!isHasSimReady()) return
 
-        // 每次来电触发时，再读取一次手动配对配置
         applyManualPairIfEnabled()
-
         val peer = peerIp
         if (peer == null) {
-            AppLog.i(this, "有卡端：未找到接听端（请确保无卡机已启动服务，或手动配对 IP）")
+            AppLog.i(this, "有卡端：未找到接听端（请先配对/确保对端在线）")
             return
         }
 
@@ -341,8 +344,7 @@ class CoreService : Service() {
             .put("controlPort", AppConfig.CONTROL_PORT)
 
         sendJson(peer, peerControlPort, obj)
-
-        AppLog.i(this, "有卡端：已发送 INVITE 到接听端 ${peer.hostAddress}")
+        AppLog.i(this, "有卡端：发送 INVITE -> ${peer.hostAddress} 号码=$number")
     }
 
     private fun ringAndShowIncoming(number: String) {
