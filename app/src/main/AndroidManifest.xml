@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Wi-Fi 广播发现（仍保留：没手动配对时可用） -->
+    <!-- Wi-Fi 广播发现/多播 -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
@@ -16,11 +16,9 @@
     <!-- 震动 -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
-    <!-- 扫码 -->
-    <uses-permission android:name="android.permission.CAMERA" />
-
-    <!-- 开机广播（如果你已做开机自启，保留即可；没有也不影响） -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 通知 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -28,9 +26,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
 
-    <!-- 通知（Android 13+ 运行时授权；全屏来电依赖通知） -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- 短信（如果你已做短信同步就保留） -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+
+    <!-- 扫码 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- 蓝牙（用于“蓝牙耳机模式检测/未来BT模式”） -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
 
     <application
         android:allowBackup="true"
@@ -38,7 +43,6 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true">
 
-        <!-- 无卡机来电界面：全屏 + 锁屏可弹 -->
         <activity
             android:name=".IncomingCallActivity"
             android:exported="false"
@@ -48,7 +52,10 @@
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
-        <!-- 主界面 -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -58,35 +65,19 @@
             </intent-filter>
         </activity>
 
-        <!-- 日志页 -->
-        <activity
-            android:name=".LogActivity"
-            android:exported="false" />
+        <!-- 你原有的：短信箱/通话记录/日志/配对/二维码等 Activity（如果存在请保留原声明） -->
+        <!-- SmsListActivity / CallLogActivity / LogActivity / PairingActivity / ShowQrActivity ... -->
 
-        <!-- 有卡机：手动配对页（输入 IP / 扫码） -->
-        <activity
-            android:name=".PairingActivity"
-            android:exported="false" />
-
-        <!-- 无卡机：展示二维码页 -->
-        <activity
-            android:name=".ShowQrActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
-
-        <!-- 常驻服务：局域网发现 + 控制信令 -->
         <service
             android:name=".CoreService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- 通话服务：音频收发 -->
         <service
             android:name=".AudioCallService"
             android:exported="false"
             android:foregroundServiceType="microphone|phoneCall" />
 
-        <!-- 来电筛选服务（有卡机授权为来电筛选应用后回调） -->
         <service
             android:name=".MyCallScreeningService"
             android:exported="true"
@@ -96,17 +87,14 @@
             </intent-filter>
         </service>
 
-        <!-- 如果你之前已加 BootReceiver，这里也可以继续保留（没加也不影响本次功能） -->
-        <!--
         <receiver
-            android:name=".BootReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            android:name=".SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="999">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
         </receiver>
-        -->
 
     </application>
 
