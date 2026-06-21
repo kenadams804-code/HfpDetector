@@ -23,9 +23,9 @@ class ShowQrActivity : Activity() {
             setTextColor(Color.WHITE)
             setPadding(30, 60, 30, 20)
             text = if (ip.isBlank()) {
-                "未获取到 Wi‑Fi IP。\n请先连接同一个 Wi‑Fi 后再打开本页。"
+                "未获取到 Wi‑Fi IP。\n请先连接 Wi‑Fi/热点后再打开本页。"
             } else {
-                "接听端 IP：$ip\n请在有卡手机“手动配对”里扫码"
+                "接听端（无卡机）IP：$ip\n请用有卡手机扫码配对"
             }
         }
 
