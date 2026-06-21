@@ -18,6 +18,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -234,14 +235,6 @@ class CoreService : Service() {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
         when (obj.optString("type")) {
 
-            "HELLO" -> {
-                if (isHasSimReady() && !Prefs.isManualPairEnabled(this)) {
-                    peerIp = fromIp
-                    peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
-                    Prefs.markPeerSeen(this, fromIp.hostAddress)
-                }
-            }
-
             "PING" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val pong = JSONObject().put("type", "PONG").put("t", obj.optLong("t", System.currentTimeMillis()))
@@ -257,18 +250,6 @@ class CoreService : Service() {
                 }
             }
 
-            "PING_TEST" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress)
-                val nonce = obj.optString("nonce", "")
-                val resp = JSONObject().put("type", "PONG_TEST").put("nonce", nonce)
-                sendJson(fromIp, fromPort, resp)
-                AppLog.i(this, "收到 PING_TEST，已回复 PONG_TEST -> ${fromIp.hostAddress}:$fromPort")
-            }
-
-            /**
-             * ✅ 核心：收到 INVITE 不依赖 simState，直接处理 + 回 ACK
-             * 并且 ACK 回两个端口：fromPort + controlPort（彻底排除“回错端口”问题）
-             */
             "INVITE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
 
@@ -283,7 +264,7 @@ class CoreService : Service() {
                     .put("callId", cid)
                     .put("test", isTest)
 
-                // 先回 ACK（再做UI），并且回两次（两个端口）
+                // 回ACK到两个端口
                 sendJson(fromIp, fromPort, ack)
                 sendJson(fromIp, senderCtrlPort, ack)
 
@@ -304,37 +285,6 @@ class CoreService : Service() {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
-
-            "ACCEPT" -> {
-                if (isHasSimReady()) {
-                    Prefs.markPeerSeen(this, fromIp.hostAddress)
-
-                    val cid = obj.optString("callId", "")
-                    val receiverAudioPort = obj.optInt("audioPort", 0)
-                    val receiverIp = fromIp.hostAddress
-
-                    if (cid.isNotBlank() && cid == callId && receiverAudioPort != 0 && myAudioPort != 0) {
-                        AppLog.i(this, "有卡端：对方接听，开始对讲 receiver=$receiverIp:$receiverAudioPort")
-                        AudioCallService.start(
-                            context = this,
-                            peerIp = receiverIp,
-                            peerAudioPort = receiverAudioPort,
-                            myAudioPort = myAudioPort
-                        )
-                    }
-                }
-            }
-
-            "DECLINE" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress)
-                if (isHasSimReady()) AppLog.i(this, "有卡端：对方拒绝")
-            }
-
-            "HANGUP" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress)
-                AudioCallService.stop(this)
-                AppLog.i(this, "通话挂断")
-            }
         }
     }
 
@@ -346,9 +296,6 @@ class CoreService : Service() {
         } catch (_: Throwable) {}
     }
 
-    /**
-     * ✅ INVITE 发送改为后台线程 + 重发3次（排除单包丢失）
-     */
     private fun handleInviteSend(number: String, isTest: Boolean) {
         if (!isHasSimReady()) {
             AppLog.i(this, "本机不是有卡端，忽略发送 INVITE")
@@ -395,20 +342,31 @@ class CoreService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // try/catch 防止通知权限/系统限制导致异常
-        try {
-            val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
-                .setSmallIcon(android.R.drawable.sym_call_incoming)
-                .setContentTitle("来电")
-                .setContentText(number)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setCategory(NotificationCompat.CATEGORY_CALL)
-                .setFullScreenIntent(pi, true)
-                .setAutoCancel(true)
-                .build()
-            nm.notify(AppConfig.NID_INCOMING, n)
-        } catch (t: Throwable) {
-            AppLog.i(this, "接听端：发布来电通知失败：${t.javaClass.simpleName} ${t.message}")
+        val notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        if (!notificationsEnabled) {
+            AppLog.i(this, "接听端：通知被系统关闭 -> 尝试直接拉起来电界面")
+            try {
+                startActivity(fullScreenIntent)
+            } catch (t: Throwable) {
+                AppLog.i(this, "接听端：直接拉起来电界面失败：${t.javaClass.simpleName} ${t.message}")
+            }
+        } else {
+            try {
+                val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
+                    .setSmallIcon(android.R.drawable.sym_call_incoming)
+                    .setContentTitle("来电")
+                    .setContentText(number)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setFullScreenIntent(pi, true)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setAutoCancel(true)
+                    .build()
+
+                nm.notify(AppConfig.NID_INCOMING, n)
+            } catch (t: Throwable) {
+                AppLog.i(this, "接听端：发布来电通知失败：${t.javaClass.simpleName} ${t.message}")
+            }
         }
 
         startRinging()
@@ -488,6 +446,7 @@ class CoreService : Service() {
         nm.createNotificationChannel(
             NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
         )
+        // 这里用新的 CH_CALL（v2），系统会重新创建一个高重要性通道
         nm.createNotificationChannel(
             NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
         )
