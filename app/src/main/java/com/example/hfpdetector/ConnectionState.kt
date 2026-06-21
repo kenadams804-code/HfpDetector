@@ -3,13 +3,13 @@ package com.example.hfpdetector
 import android.content.Context
 
 object ConnectionState {
+
+    // 多久内收到对端回应算“已连接”
+    private const val CONNECT_VALID_MS = 10_000L
+
     fun isConnected(context: Context): Boolean {
-        // 规则：最近 10 秒看到对端，或已配置手动配对 IP
-        val now = System.currentTimeMillis()
         val seen = Prefs.getPeerSeenTs(context)
-        val recent = (System.currentTimeMillis() - Prefs.getPeerSeenTs(context)) <= 10_000
-        return recent
-        val manual = Prefs.isManualPairEnabled(context) && Prefs.getPeerIp(context).isNotBlank()
-        return recent || manual
+        if (seen <= 0L) return false
+        return (System.currentTimeMillis() - seen) <= CONNECT_VALID_MS
     }
 }
