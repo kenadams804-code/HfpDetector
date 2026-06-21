@@ -266,9 +266,8 @@ class CoreService : Service() {
             }
 
             /**
-             * ✅ 核心修复：
-             * 不再依赖 isHasSimReady() 判断。收到 INVITE 一律当作“接听端来电”处理并回 INVITE_ACK。
-             * 这样就算某些 ROM 的 simState 在无卡机上返回异常，也不会丢 INVITE。
+             * ✅ 核心：收到 INVITE 不依赖 simState，直接处理 + 回 ACK
+             * 并且 ACK 回两个端口：fromPort + controlPort（彻底排除“回错端口”问题）
              */
             "INVITE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
@@ -279,12 +278,14 @@ class CoreService : Service() {
                 val senderCtrlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
                 val isTest = obj.optBoolean("test", false)
 
-                // 回 ACK（让有卡机确认无卡机确实收到了 INVITE）
                 val ack = JSONObject()
                     .put("type", "INVITE_ACK")
                     .put("callId", cid)
                     .put("test", isTest)
+
+                // 先回 ACK（再做UI），并且回两次（两个端口）
                 sendJson(fromIp, fromPort, ack)
+                sendJson(fromIp, senderCtrlPort, ack)
 
                 CallState.incoming = PendingInvite(
                     callId = cid,
@@ -300,7 +301,6 @@ class CoreService : Service() {
             }
 
             "INVITE_ACK" -> {
-                // 有卡机收到 ACK（这里不依赖 simState，收到就记日志）
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
@@ -346,33 +346,44 @@ class CoreService : Service() {
         } catch (_: Throwable) {}
     }
 
+    /**
+     * ✅ INVITE 发送改为后台线程 + 重发3次（排除单包丢失）
+     */
     private fun handleInviteSend(number: String, isTest: Boolean) {
         if (!isHasSimReady()) {
             AppLog.i(this, "本机不是有卡端，忽略发送 INVITE")
             return
         }
 
-        applyManualPairIfEnabled()
-        val peer = peerIp
-        if (peer == null) {
-            AppLog.i(this, "有卡端：未找到接听端（请先配对/确保对端在线）")
-            return
+        thread(name = "send-invite") {
+            applyManualPairIfEnabled()
+            val peer = peerIp
+            if (peer == null) {
+                AppLog.i(this, "有卡端：未找到接听端（请先配对/确保对端在线）")
+                return@thread
+            }
+
+            val cid = UUID.randomUUID().toString()
+            callId = cid
+            myAudioPort = Random.nextInt(45000, 45999)
+
+            val obj = JSONObject()
+                .put("type", "INVITE")
+                .put("callId", cid)
+                .put("number", number)
+                .put("audioPort", myAudioPort)
+                .put("controlPort", AppConfig.CONTROL_PORT)
+                .put("test", isTest)
+
+            // 重发 3 次
+            val delays = longArrayOf(0, 120, 300)
+            for (d in delays) {
+                try { Thread.sleep(d) } catch (_: Throwable) {}
+                sendJson(peer, peerControlPort, obj)
+            }
+
+            AppLog.i(this, "有卡端：发送 INVITE x3 -> ${peer.hostAddress} number=$number test=$isTest")
         }
-
-        val cid = UUID.randomUUID().toString()
-        callId = cid
-        myAudioPort = Random.nextInt(45000, 45999)
-
-        val obj = JSONObject()
-            .put("type", "INVITE")
-            .put("callId", cid)
-            .put("number", number)
-            .put("audioPort", myAudioPort)
-            .put("controlPort", AppConfig.CONTROL_PORT)
-            .put("test", isTest)
-
-        sendJson(peer, peerControlPort, obj)
-        AppLog.i(this, "有卡端：发送 INVITE -> ${peer.hostAddress} number=$number test=$isTest")
     }
 
     private fun ringAndShowIncoming(number: String) {
@@ -384,7 +395,7 @@ class CoreService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // 通知可能因 Android 13+ 未开通知权限而失败，所以 try/catch + 记录
+        // try/catch 防止通知权限/系统限制导致异常
         try {
             val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
                 .setSmallIcon(android.R.drawable.sym_call_incoming)
@@ -395,10 +406,9 @@ class CoreService : Service() {
                 .setFullScreenIntent(pi, true)
                 .setAutoCancel(true)
                 .build()
-
             nm.notify(AppConfig.NID_INCOMING, n)
         } catch (t: Throwable) {
-            AppLog.i(this, "接听端：发布来电通知失败（可能未开通知权限）：${t.javaClass.simpleName} ${t.message}")
+            AppLog.i(this, "接听端：发布来电通知失败：${t.javaClass.simpleName} ${t.message}")
         }
 
         startRinging()
@@ -464,7 +474,6 @@ class CoreService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
         return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("LanCall")
