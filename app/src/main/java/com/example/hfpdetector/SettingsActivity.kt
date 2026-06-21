@@ -39,9 +39,14 @@ class SettingsActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(title)
-            addView(scroll, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-            ))
+            addView(
+                scroll,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+                )
+            )
         }
         setContentView(root)
     }
@@ -54,27 +59,58 @@ class SettingsActivity : Activity() {
     private fun render() {
         box.removeAllViews()
 
+        // 通知（Android 13+ 才有运行时开关，但低版本也可能被系统关闭，所以统一用 areNotificationsEnabled 判断）
         addPermRow(
-            "通知权限（Android 13+）",
+            title = "通知（用于来电全屏弹出/通知）",
             isOn = { NotificationManagerCompat.from(this).areNotificationsEnabled() },
             onEnable = { openNotificationSettings() },
-            onDisable = { openAppDetailsSettings() }
+            onDisable = { openNotificationSettings() }
         )
 
-        addRuntimePermRow("麦克风（RECORD_AUDIO）", Manifest.permission.RECORD_AUDIO)
-        addRuntimePermRow("接收短信（RECEIVE_SMS）", Manifest.permission.RECEIVE_SMS)
-        addRuntimePermRow("读取短信（READ_SMS，用于同步发件箱）", Manifest.permission.READ_SMS)
-        addRuntimePermRow("相机（CAMERA，用于扫码配对）", Manifest.permission.CAMERA)
+        addRuntimePermRow(
+            title = "麦克风 RECORD_AUDIO（用于内网通话）",
+            perm = Manifest.permission.RECORD_AUDIO
+        )
+
+        addRuntimePermRow(
+            title = "接收短信 RECEIVE_SMS（用于同步收件箱）",
+            perm = Manifest.permission.RECEIVE_SMS
+        )
+
+        addRuntimePermRow(
+            title = "读取短信 READ_SMS（用于同步发件箱）",
+            perm = Manifest.permission.READ_SMS
+        )
+
+        addRuntimePermRow(
+            title = "相机 CAMERA（用于扫码配对）",
+            perm = Manifest.permission.CAMERA
+        )
 
         if (Build.VERSION.SDK_INT >= 31) {
-            addRuntimePermRow("蓝牙连接（BLUETOOTH_CONNECT，用于HFP检测）", Manifest.permission.BLUETOOTH_CONNECT)
+            addRuntimePermRow(
+                title = "蓝牙连接 BLUETOOTH_CONNECT（用于蓝牙模式检测/蓝牙模式）",
+                perm = Manifest.permission.BLUETOOTH_CONNECT
+            )
         }
 
         addCallScreeningRow()
 
+        // HFP 检测不是“授权”，但你希望也在设置里用一条可控项展示，这里按“开/关”的交互来做：
+        // - 关：未检测/未知
+        // - 开：已检测（YES/NO）
+        val hfp = Prefs.getHfpSupport(this) // UNKNOWN/YES/NO
+        val hfpOn = hfp != "UNKNOWN"
         addPermRow(
-            "蓝牙耳机模式兼容性检测（HFP）",
-            isOn = { Prefs.getHfpSupport(this) == "YES" },
+            title = "蓝牙耳机模式检测（HFP 支持性）",
+            isOn = { hfpOn },
+            statusOverride = {
+                when (hfp) {
+                    "YES" -> "状态：开（已检测：支持）"
+                    "NO" -> "状态：开（已检测：不支持）"
+                    else -> "状态：关（未检测）"
+                }
+            },
             onEnable = {
                 if (!HfpCompat.canRunCheck(this)) {
                     toast("请先打开蓝牙，并授予蓝牙连接权限")
@@ -91,23 +127,37 @@ class SettingsActivity : Activity() {
                 Prefs.setHfpSupport(this, "UNKNOWN")
                 toast("已清除检测结果")
                 render()
+            },
+            buttonOverride = {
+                // 关 -> 去开启（开始检测）；开 -> 去关闭（清除结果）
+                if (hfpOn) "去关闭（清除结果）" else "去开启（开始检测）"
             }
         )
 
+        // 入口（非授权项）
         addPermRow(
-            "手动配对/扫码（入口）",
+            title = "配对（手动配对/扫码）入口",
             isOn = { true },
-            onEnable = {
-                // 如果你项目里有 PairingActivity/ShowQrActivity，可在这里跳转
-                toast("请在主界面进入配对/二维码页面")
-            },
+            statusOverride = { "状态：开（入口）" },
+            buttonOverride = { "打开说明" },
+            onEnable = { toast("请在主界面进入配对/二维码页面") },
             onDisable = { }
+        )
+
+        // 通用：应用详情（方便你在系统里统一关权限）
+        addPermRow(
+            title = "应用系统设置（统一管理权限/后台/自启动）",
+            isOn = { true },
+            statusOverride = { "状态：开（入口）" },
+            buttonOverride = { "打开系统设置" },
+            onEnable = { openAppDetailsSettings() },
+            onDisable = { openAppDetailsSettings() }
         )
     }
 
     private fun addRuntimePermRow(title: String, perm: String) {
         addPermRow(
-            title,
+            title = title,
             isOn = { hasPerm(perm) },
             onEnable = {
                 if (Build.VERSION.SDK_INT >= 23) requestPermissions(arrayOf(perm), 9001)
@@ -121,12 +171,19 @@ class SettingsActivity : Activity() {
         val hasSim = tm?.simState == TelephonyManager.SIM_STATE_READY
 
         addPermRow(
-            "来电号码同步（Call Screening，仅有卡机需要）",
+            title = "来电号码同步（Call Screening，仅有卡机需要）",
             isOn = {
                 if (!hasSim) return@addPermRow false
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@addPermRow false
                 val rm = getSystemService(RoleManager::class.java)
                 rm?.isRoleHeld(RoleManager.ROLE_CALL_SCREENING) == true
+            },
+            statusOverride = {
+                if (!hasSim) return@addPermRow "状态：关（无卡机不需要）"
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@addPermRow "状态：关（系统不支持）"
+                val rm = getSystemService(RoleManager::class.java)
+                val held = rm?.isRoleHeld(RoleManager.ROLE_CALL_SCREENING) == true
+                if (held) "状态：开（已开启）" else "状态：关（未开启）"
             },
             onEnable = {
                 if (!hasSim) { toast("无卡机不需要此项"); return@addPermRow }
@@ -146,26 +203,33 @@ class SettingsActivity : Activity() {
         title: String,
         isOn: () -> Boolean,
         onEnable: () -> Unit,
-        onDisable: () -> Unit
+        onDisable: () -> Unit,
+        statusOverride: (() -> String)? = null,
+        buttonOverride: (() -> String)? = null
     ) {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, 20, 0, 20)
+            setPadding(0, 18, 0, 18)
         }
 
         val tv = TextView(this).apply {
             textSize = 16f
             text = title
         }
+
         val st = TextView(this).apply {
             textSize = 12f
-            val on = isOn()
-            text = if (on) "状态：已开启" else "状态：未开启"
+            text = statusOverride?.invoke() ?: run {
+                val on = isOn()
+                if (on) "状态：开（已授权/已开启）" else "状态：关（未授权/未开启）"
+            }
         }
 
         val btn = Button(this).apply {
-            val on = isOn()
-            text = if (on) "关闭（去系统）" else "开启"
+            text = buttonOverride?.invoke() ?: run {
+                val on = isOn()
+                if (on) "去关闭（系统）" else "去开启"
+            }
             setOnClickListener {
                 if (isOn()) onDisable() else onEnable()
             }
