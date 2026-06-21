@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONObject
@@ -55,7 +56,6 @@ class IncomingCallActivity : Activity() {
         }
         val number = invite.number.ifBlank { "未知号码" }
 
-        // ===== UI 根布局 =====
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#0E0E0E"))
@@ -103,7 +103,6 @@ class IncomingCallActivity : Activity() {
         center.addView(tvNumber)
         center.addView(tvHint)
 
-        // ===== 底部：左右两个圆形按钮 =====
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -154,7 +153,6 @@ class IncomingCallActivity : Activity() {
         bottom.addView(leftCol)
         bottom.addView(rightCol)
 
-        // 组装
         root.addView(tvTop)
         root.addView(tvSub)
         root.addView(center)
@@ -162,13 +160,18 @@ class IncomingCallActivity : Activity() {
 
         setContentView(root)
 
-        // 点击事件（保证一定响应）
-        btnDecline.setOnClickListener { decline() }
-        btnAccept.setOnClickListener { accept() }
+        btnDecline.setOnClickListener {
+            AppLog.i(this, "IncomingCallActivity：点击拒绝")
+            decline()
+        }
+
+        btnAccept.setOnClickListener {
+            AppLog.i(this, "IncomingCallActivity：点击接听")
+            accept()
+        }
     }
 
     private fun accept() {
-        // 需要麦克风权限
         if (Build.VERSION.SDK_INT >= 23 &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -180,7 +183,6 @@ class IncomingCallActivity : Activity() {
 
         val myAudioPort = Random.nextInt(46000, 46999)
 
-        // 回 ACCEPT 给有卡机
         sendControl(
             ip = invite.peerIp,
             port = invite.peerControlPort,
@@ -191,10 +193,8 @@ class IncomingCallActivity : Activity() {
                 .toString()
         )
 
-        // 停铃/停震动
         CoreService.stopRingingNow(this)
 
-        // 启动音频对讲
         AudioCallService.start(
             context = this,
             peerIp = invite.peerIp,
@@ -224,7 +224,6 @@ class IncomingCallActivity : Activity() {
     }
 
     override fun onBackPressed() {
-        // 返回键按“拒绝”处理，更像系统来电
         decline()
     }
 
@@ -234,9 +233,7 @@ class IncomingCallActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 5001) {
-            accept()
-        }
+        if (requestCode == 5001) accept()
     }
 
     private fun sendControl(ip: String, port: Int, json: String) {
@@ -259,9 +256,11 @@ class IncomingCallActivity : Activity() {
                 setColor(Color.parseColor(bgColor))
             }
 
-            // 大小/边距（你要的“圆形大按钮”）
             layoutParams = LinearLayout.LayoutParams(dp(88), dp(88))
-            scaleType = ImageButton.ScaleType.CENTER
+
+            // ✅ 修正点：ScaleType 属于 ImageView.ScaleType
+            scaleType = ImageView.ScaleType.CENTER
+
             isClickable = true
             isFocusable = true
         }
