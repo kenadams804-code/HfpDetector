@@ -56,7 +56,6 @@ class CoreService : Service() {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
         }
 
-        /** 有卡机：发送一条“测试来电 INVITE”到无卡机，用来验证链路 */
         fun sendTestInvite(context: Context) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_TEST_INVITE)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
@@ -240,7 +239,7 @@ class CoreService : Service() {
                     peerIp = fromIp
                     peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
                     Prefs.markPeerSeen(this, fromIp.hostAddress)
-                    AppLog.i(this, "有卡端：自动发现接听端 $fromIp")
+                    // 这个日志很密，先不打印
                 }
             }
 
@@ -267,6 +266,7 @@ class CoreService : Service() {
                 AppLog.i(this, "收到 PING_TEST，已回复 PONG_TEST -> ${fromIp.hostAddress}:$fromPort")
             }
 
+            // ✅ 核心：无卡机收到 INVITE 后回 ACK，帮助你确认“到底有没有收到INVITE”
             "INVITE" -> {
                 if (!isHasSimReady()) {
                     Prefs.markPeerSeen(this, fromIp.hostAddress)
@@ -275,6 +275,14 @@ class CoreService : Service() {
                     val cid = obj.optString("callId", UUID.randomUUID().toString())
                     val senderAudioPort = obj.optInt("audioPort", 0)
                     val senderCtrlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
+                    val isTest = obj.optBoolean("test", false)
+
+                    // 回 ACK
+                    val ack = JSONObject()
+                        .put("type", "INVITE_ACK")
+                        .put("callId", cid)
+                        .put("test", isTest)
+                    sendJson(fromIp, fromPort, ack)
 
                     CallState.incoming = PendingInvite(
                         callId = cid,
@@ -284,9 +292,17 @@ class CoreService : Service() {
                         peerAudioPort = senderAudioPort
                     )
 
-                    AppLog.i(this, "接听端：收到 INVITE 号码=$number from=$fromIp")
+                    AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
                     stopRinging()
                     ringAndShowIncoming(number)
+                }
+            }
+
+            // 有卡机收到 ACK
+            "INVITE_ACK" -> {
+                if (isHasSimReady()) {
+                    Prefs.markPeerSeen(this, fromIp.hostAddress)
+                    AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
                 }
             }
 
@@ -331,7 +347,6 @@ class CoreService : Service() {
         } catch (_: Throwable) {}
     }
 
-    /** 统一的 INVITE 发送（真实来电 / 测试来电都走这里） */
     private fun handleInviteSend(number: String, isTest: Boolean) {
         if (!isHasSimReady()) {
             AppLog.i(this, "本机不是有卡端，忽略发送 INVITE")
@@ -358,7 +373,7 @@ class CoreService : Service() {
             .put("test", isTest)
 
         sendJson(peer, peerControlPort, obj)
-        AppLog.i(this, "有卡端：发送 INVITE -> ${peer.hostAddress} 号码=$number test=$isTest")
+        AppLog.i(this, "有卡端：发送 INVITE -> ${peer.hostAddress} number=$number test=$isTest")
     }
 
     private fun ringAndShowIncoming(number: String) {
@@ -370,17 +385,24 @@ class CoreService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
-            .setSmallIcon(android.R.drawable.sym_call_incoming)
-            .setContentTitle("来电")
-            .setContentText(number)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setFullScreenIntent(pi, true)
-            .setAutoCancel(true)
-            .build()
+        // 通知可能因 Android 13+ 未开通知权限而失败，所以必须 try/catch
+        try {
+            val n = NotificationCompat.Builder(this, AppConfig.CH_CALL)
+                .setSmallIcon(android.R.drawable.sym_call_incoming)
+                .setContentTitle("来电")
+                .setContentText(number)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setFullScreenIntent(pi, true)
+                .setAutoCancel(true)
+                .build()
 
-        nm.notify(AppConfig.NID_INCOMING, n)
+            nm.notify(AppConfig.NID_INCOMING, n)
+        } catch (t: Throwable) {
+            AppLog.i(this, "接听端：发布来电通知失败（可能未开通知权限）：${t.javaClass.simpleName} ${t.message}")
+        }
+
+        // 即使通知发不出去，也尽量响铃/震动（至少你能听到）
         startRinging()
     }
 
@@ -456,7 +478,6 @@ class CoreService : Service() {
 
     private fun createChannels() {
         if (Build.VERSION.SDK_INT < 26) return
-
         nm.createNotificationChannel(
             NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
         )
