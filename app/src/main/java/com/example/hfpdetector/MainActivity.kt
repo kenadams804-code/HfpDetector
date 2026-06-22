@@ -1,8 +1,11 @@
 package com.example.hfpdetector
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -10,6 +13,9 @@ import android.telephony.TelephonyManager
 import android.view.Gravity
 import android.view.View
 import android.widget.*
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : Activity() {
 
@@ -21,17 +27,15 @@ class MainActivity : Activity() {
 
     private lateinit var swService: Switch
     private lateinit var ivService: ImageView
-
     private lateinit var swSilence: Switch
 
+    private lateinit var btnQuickSetup: Button
     private lateinit var btnSettings: Button
     private lateinit var btnPair: Button
     private lateinit var btnShowQr: Button
     private lateinit var btnLog: Button
-
     private lateinit var btnCalls: Button
     private lateinit var btnSms: Button
-
     private lateinit var btnTestInvite: Button
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -43,6 +47,9 @@ class MainActivity : Activity() {
     }
 
     private var hasSim: Boolean = false
+
+    private val REQ_PERMS_ALL = 7001
+    private val setupSp by lazy { getSharedPreferences("lancall_setup", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,7 +80,7 @@ class MainActivity : Activity() {
         val (rowService, serviceSwitch, serviceIcon) = makeSettingSwitchRow(
             iconRes = android.R.drawable.ic_popup_sync,
             title = "常驻服务",
-            subtitle = "开=后台工作（来电/连接可用）"
+            subtitle = "开=后台待机（来电/消息到达就触发）"
         )
         swService = serviceSwitch
         ivService = serviceIcon
@@ -85,6 +92,8 @@ class MainActivity : Activity() {
             isChecked = Prefs.isSilencePstn(this@MainActivity)
             visibility = if (hasSim) View.VISIBLE else View.GONE
         }
+
+        btnQuickSetup = Button(this).apply { text = "一键授权/准备（推荐）" }
 
         btnSettings = Button(this).apply { text = "设置（授权/检测/系统跳转）" }
         btnPair = Button(this).apply { text = "配对（有卡机：填IP/扫码）" }
@@ -114,22 +123,28 @@ class MainActivity : Activity() {
             addView(rowService)
             addView(swSilence)
 
+            addView(btnQuickSetup)
             addView(btnSettings)
             addView(btnPair)
             addView(btnShowQr)
             addView(btnLog)
-
             addView(btnCalls)
             addView(btnSms)
-
             addView(btnTestInvite)
         }
         setContentView(root)
 
+        btnQuickSetup.setOnClickListener { requestAllRuntimePermissions(force = true) }
+
         swService.setOnCheckedChangeListener { _, checked ->
             Prefs.setServiceEnabled(this, checked)
             updateServiceIconColor(checked)
-            if (checked) CoreService.start(this) else CoreService.stop(this)
+            if (checked) {
+                requestAllRuntimePermissions(force = false)
+                CoreService.start(this)
+            } else {
+                CoreService.stop(this)
+            }
             refresh()
         }
 
@@ -141,7 +156,7 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val allow = modeAdapter.isEnabled(position)
                 if (!allow) {
-                    Toast.makeText(this@MainActivity, "当前不可用：请先配对/或蓝牙不支持", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "当前不可用：请先开启常驻服务/或蓝牙不支持", Toast.LENGTH_SHORT).show()
                     spinner.setSelection(lastGoodSelection)
                     return
                 }
@@ -162,8 +177,11 @@ class MainActivity : Activity() {
 
         btnTestInvite.setOnClickListener {
             CoreService.sendTestInvite(this)
-            Toast.makeText(this, "已发送测试 INVITE（看无卡机是否弹窗）", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已发送测试 INVITE（对方在线就会弹窗）", Toast.LENGTH_SHORT).show()
         }
+
+        // 启动时自动准备一次（缺权限才会弹）
+        requestAllRuntimePermissions(force = false)
 
         if (Prefs.isServiceEnabled(this)) CoreService.start(this)
         refresh()
@@ -180,17 +198,65 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(refreshRunnable)
     }
 
+    private fun hasPerm(p: String): Boolean {
+        return ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestAllRuntimePermissions(force: Boolean) {
+        val askedKey = "asked_runtime_perms"
+        if (!force && setupSp.getBoolean(askedKey, false)) {
+            // 已问过就不重复弹（除非你点“一键授权/准备”强制）
+        }
+
+        val need = mutableListOf<String>()
+
+        // Android 13+ 通知权限
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (!hasPerm(Manifest.permission.POST_NOTIFICATIONS)) need += Manifest.permission.POST_NOTIFICATIONS
+        }
+
+        // 麦克风（对讲）
+        if (!hasPerm(Manifest.permission.RECORD_AUDIO)) need += Manifest.permission.RECORD_AUDIO
+
+        // 相机（扫码）
+        if (!hasPerm(Manifest.permission.CAMERA)) need += Manifest.permission.CAMERA
+
+        // 蓝牙（BT 模式）
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) need += Manifest.permission.BLUETOOTH_CONNECT
+        }
+
+        // ✅ 短信（只在有卡机需要）
+        if (hasSim) {
+            if (!hasPerm(Manifest.permission.RECEIVE_SMS)) need += Manifest.permission.RECEIVE_SMS
+        }
+
+        if (need.isNotEmpty()) {
+            setupSp.edit().putBoolean(askedKey, true).apply()
+            ActivityCompat.requestPermissions(this, need.toTypedArray(), REQ_PERMS_ALL)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_PERMS_ALL) refresh()
+    }
+
     private fun refresh() {
         val serviceOn = Prefs.isServiceEnabled(this)
         val connected = ConnectionState.isConnected(this)
         val hfpYes = Prefs.getHfpSupport(this) == "YES"
 
-        // 模式是否可选：这里先保留你原逻辑
-        modeAdapter.enableLan = serviceOn && connected
-        modeAdapter.enableBt = serviceOn && connected && hfpYes
+        // ✅ 模式A：不要用 connected 禁用按钮（避免“变灰/不可预知”）
+        modeAdapter.enableLan = serviceOn
+        modeAdapter.enableBt = serviceOn && hfpYes
         modeAdapter.notifyDataSetChanged()
 
-        // ✅ 模式A：测试 INVITE 不要依赖 connected（避免变灰）
+        // 测试 INVITE：只要服务开就能点
         btnTestInvite.isEnabled = serviceOn
 
         val localIp = runCatching { NetUtils.getLocalWifiIp(this) }.getOrDefault("")
@@ -199,12 +265,19 @@ class MainActivity : Activity() {
             if (ts <= 0) -1 else ((System.currentTimeMillis() - ts) / 1000).toInt()
         }
 
+        val notifEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        val micGranted = hasPerm(Manifest.permission.RECORD_AUDIO)
+        val smsGranted = if (hasSim) hasPerm(Manifest.permission.RECEIVE_SMS) else true
+
         tip.text = buildString {
             append("本机：${if (hasSim) "有卡手机" else "无卡手机"}\n")
             append("常驻服务：${if (serviceOn) "开" else "关"}\n")
             append("连接状态：${if (connected) "已连接" else "未连接"}")
             if (seenAgoSec >= 0) append("（$seenAgoSec 秒前）")
             append("\n")
+            append("通知总开关：${if (notifEnabled) "允许" else "未允许"}\n")
+            append("麦克风权限：${if (micGranted) "已授权" else "未授权"}\n")
+            if (hasSim) append("短信权限：${if (smsGranted) "已授权" else "未授权"}\n")
             append("对端IP(保存)：${Prefs.getPeerIp(this@MainActivity).ifBlank { "(空)" }}\n")
             append("对端IP(最近看到)：${Prefs.getPeerSeenIp(this@MainActivity).ifBlank { "(空)" }}\n")
             append("本机Wi‑Fi IP：${if (localIp.isBlank()) "(未获取到)" else localIp}\n")
