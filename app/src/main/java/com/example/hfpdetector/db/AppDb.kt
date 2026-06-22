@@ -16,15 +16,13 @@ abstract class AppDb : RoomDatabase() {
 
     companion object {
         @Volatile private var inst: AppDb? = null
-
-        fun get(context: Context): AppDb {
-            return inst ?: synchronized(this) {
+        fun get(context: Context): AppDb =
+            inst ?: synchronized(this) {
                 inst ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDb::class.java,
                     "lancall.db"
                 ).build().also { inst = it }
             }
-        }
     }
 }
