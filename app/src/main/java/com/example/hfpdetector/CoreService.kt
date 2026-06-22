@@ -36,7 +36,6 @@ class CoreService : Service() {
         private const val ACTION_STOP_RING = "CoreService.STOP_RING"
         private const val ACTION_TEST_INVITE = "CoreService.TEST_INVITE"
 
-        // ✅ 短信转发（从 SmsReceiver 进来）
         private const val ACTION_FORWARD_SMS = "CoreService.FORWARD_SMS"
 
         fun start(context: Context) {
@@ -253,8 +252,7 @@ class CoreService : Service() {
                         .put("type", "HELLO")
                         .put("controlPort", AppConfig.CONTROL_PORT)
                     val data = obj.toString().toByteArray(Charsets.UTF_8)
-                    val p = DatagramPacket(data, data.size, bcast, AppConfig.CONTROL_PORT)
-                    socket?.send(p)
+                    socket?.send(DatagramPacket(data, data.size, bcast, AppConfig.CONTROL_PORT))
 
                     val now = System.currentTimeMillis()
                     if (now - lastHelloLogTs > 20_000) {
@@ -319,7 +317,7 @@ class CoreService : Service() {
                     peerAudioPort = senderAudioPort
                 )
 
-                // ✅ 写入“来电记录”
+                // ✅ 通话记录：来电响铃
                 HistoryStore.upsertCall(this, cid, "IN", number, fromIp.hostAddress, isTest, "RINGING")
 
                 AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
@@ -339,7 +337,6 @@ class CoreService : Service() {
                 val peerAudioPort = obj.optInt("audioPort", 0)
 
                 AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
-
                 if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
 
                 if (peerAudioPort <= 0 || myAudioPort <= 0) {
@@ -370,7 +367,7 @@ class CoreService : Service() {
                 try { stopService(Intent(this, AudioCallService::class.java)) } catch (_: Throwable) {}
             }
 
-            // ✅ 收到短信（无卡机）
+            // ✅ 无卡机收到短信
             "SMS" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val msgId = obj.optString("msgId", UUID.randomUUID().toString())
@@ -389,8 +386,7 @@ class CoreService : Service() {
     private fun sendJson(ip: InetAddress, port: Int, obj: JSONObject) {
         try {
             val data = obj.toString().toByteArray(Charsets.UTF_8)
-            val p = DatagramPacket(data, data.size, ip, port)
-            socket?.send(p)
+            socket?.send(DatagramPacket(data, data.size, ip, port))
         } catch (_: Throwable) {}
     }
 
@@ -412,7 +408,7 @@ class CoreService : Service() {
             callId = cid
             myAudioPort = Random.nextInt(45000, 45999)
 
-            // ✅ 写入“发起端记录”
+            // ✅ 通话记录：有卡机这边记录“转发/外呼到无卡机”
             HistoryStore.upsertCall(this@CoreService, cid, "OUT", number, peer.hostAddress, isTest, "RINGING")
 
             val obj = JSONObject()
