@@ -1,24 +1,15 @@
 package com.example.hfpdetector
 
-import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
-import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.view.Gravity
 import android.view.View
 import android.widget.*
-import androidx.core.app.ActivityCompat
-import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.ContextCompat
 
 class MainActivity : Activity() {
 
@@ -37,8 +28,11 @@ class MainActivity : Activity() {
     private lateinit var btnPair: Button
     private lateinit var btnShowQr: Button
     private lateinit var btnLog: Button
+
+    private lateinit var btnCalls: Button
+    private lateinit var btnSms: Button
+
     private lateinit var btnTestInvite: Button
-    private lateinit var btnQuickSetup: Button
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
@@ -49,9 +43,6 @@ class MainActivity : Activity() {
     }
 
     private var hasSim: Boolean = false
-
-    private val REQ_PERMS_ALL = 7001
-    private val setupSp by lazy { getSharedPreferences("lancall_setup", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,7 +73,7 @@ class MainActivity : Activity() {
         val (rowService, serviceSwitch, serviceIcon) = makeSettingSwitchRow(
             iconRes = android.R.drawable.ic_popup_sync,
             title = "常驻服务",
-            subtitle = "开=后台待机（来电/消息到达就触发）"
+            subtitle = "开=后台工作（来电/连接可用）"
         )
         swService = serviceSwitch
         ivService = serviceIcon
@@ -95,12 +86,13 @@ class MainActivity : Activity() {
             visibility = if (hasSim) View.VISIBLE else View.GONE
         }
 
-        btnQuickSetup = Button(this).apply { text = "一键授权/准备（推荐）" }
-
         btnSettings = Button(this).apply { text = "设置（授权/检测/系统跳转）" }
         btnPair = Button(this).apply { text = "配对（有卡机：填IP/扫码）" }
         btnShowQr = Button(this).apply { text = "显示二维码（无卡机）" }
         btnLog = Button(this).apply { text = "系统日志（连通性测试/导出诊断包）" }
+
+        btnCalls = Button(this).apply { text = "通话记录（LanCall）" }
+        btnSms = Button(this).apply { text = "短信箱（LanCall）" }
 
         btnTestInvite = Button(this).apply { text = "发送测试来电（INVITE）" }
         btnTestInvite.visibility = if (hasSim) View.VISIBLE else View.GONE
@@ -122,27 +114,22 @@ class MainActivity : Activity() {
             addView(rowService)
             addView(swSilence)
 
-            addView(btnQuickSetup)
             addView(btnSettings)
             addView(btnPair)
             addView(btnShowQr)
             addView(btnLog)
+
+            addView(btnCalls)
+            addView(btnSms)
+
             addView(btnTestInvite)
         }
         setContentView(root)
 
-        btnQuickSetup.setOnClickListener { runQuickSetup(force = true) }
-
         swService.setOnCheckedChangeListener { _, checked ->
             Prefs.setServiceEnabled(this, checked)
             updateServiceIconColor(checked)
-
-            if (checked) {
-                runQuickSetup(force = false)
-                CoreService.start(this)
-            } else {
-                CoreService.stop(this)
-            }
+            if (checked) CoreService.start(this) else CoreService.stop(this)
             refresh()
         }
 
@@ -154,7 +141,7 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val allow = modeAdapter.isEnabled(position)
                 if (!allow) {
-                    Toast.makeText(this@MainActivity, "当前不可用：请先开启常驻服务/或蓝牙不支持", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "当前不可用：请先配对/或蓝牙不支持", Toast.LENGTH_SHORT).show()
                     spinner.setSelection(lastGoodSelection)
                     return
                 }
@@ -170,13 +157,13 @@ class MainActivity : Activity() {
         btnShowQr.setOnClickListener { startActivity(Intent(this, ShowQrActivity::class.java)) }
         btnLog.setOnClickListener { startActivity(Intent(this, LogActivity::class.java)) }
 
+        btnCalls.setOnClickListener { startActivity(Intent(this, CallHistoryActivity::class.java)) }
+        btnSms.setOnClickListener { startActivity(Intent(this, SmsBoxActivity::class.java)) }
+
         btnTestInvite.setOnClickListener {
             CoreService.sendTestInvite(this)
-            Toast.makeText(this, "已发送测试 INVITE（对方在线就会弹窗）", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已发送测试 INVITE（看无卡机是否弹窗）", Toast.LENGTH_SHORT).show()
         }
-
-        // 启动时自动准备一次（缺权限才会弹；force=false 不会每次都烦你）
-        runQuickSetup(force = false)
 
         if (Prefs.isServiceEnabled(this)) CoreService.start(this)
         refresh()
@@ -193,124 +180,17 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(refreshRunnable)
     }
 
-    private fun runQuickSetup(force: Boolean) {
-        requestAllRuntimePermissionsIfNeeded(force)
-        requestIgnoreBatteryOptimizationsIfNeeded(force)
-        openNotificationSettingsIfDisabled(force)
-    }
-
-    private fun hasPerm(p: String): Boolean {
-        // ContextCompat 在低版本也安全
-        return ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun requestAllRuntimePermissionsIfNeeded(force: Boolean) {
-        val askedKey = "asked_runtime_perms"
-        if (!force && setupSp.getBoolean(askedKey, false)) {
-            // 已经问过一次就不主动再问；除非你点“一键授权/准备（强制）”
-        }
-
-        // 运行时权限从 Android 6(API 23) 开始才存在
-        if (Build.VERSION.SDK_INT < 23) return
-
-        val need = mutableListOf<String>()
-
-        // Android 13+ 通知运行时权限
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (!hasPerm(Manifest.permission.POST_NOTIFICATIONS)) {
-                need += Manifest.permission.POST_NOTIFICATIONS
-            }
-        }
-
-        // 麦克风（对讲必须）
-        if (!hasPerm(Manifest.permission.RECORD_AUDIO)) {
-            need += Manifest.permission.RECORD_AUDIO
-        }
-
-        // 相机（扫码配对可能会用到）
-        if (!hasPerm(Manifest.permission.CAMERA)) {
-            need += Manifest.permission.CAMERA
-        }
-
-        // Android 12+ 蓝牙连接权限（BT模式入口用）
-        if (Build.VERSION.SDK_INT >= 31) {
-            if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) {
-                need += Manifest.permission.BLUETOOTH_CONNECT
-            }
-        }
-
-        if (need.isNotEmpty()) {
-            setupSp.edit().putBoolean(askedKey, true).apply()
-            ActivityCompat.requestPermissions(this, need.toTypedArray(), REQ_PERMS_ALL)
-        }
-    }
-
-    private fun requestIgnoreBatteryOptimizationsIfNeeded(force: Boolean) {
-        // 忽略电池优化的申请从 Android 6(API 23) 才有意义
-        if (Build.VERSION.SDK_INT < 23) return
-
-        val askedKey = "asked_ignore_batt"
-        if (!force && setupSp.getBoolean(askedKey, false)) return
-
-        val pm = getSystemService(PowerManager::class.java) ?: return
-        val ignoring = runCatching { pm.isIgnoringBatteryOptimizations(packageName) }.getOrDefault(false)
-        if (ignoring) return
-
-        setupSp.edit().putBoolean(askedKey, true).apply()
-
-        try {
-            val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            startActivity(i)
-        } catch (_: Throwable) {
-            runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        }
-    }
-
-    private fun openNotificationSettingsIfDisabled(force: Boolean) {
-        val askedKey = "asked_notif_settings"
-        if (!force && setupSp.getBoolean(askedKey, false)) return
-
-        val enabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
-        if (enabled) return
-
-        setupSp.edit().putBoolean(askedKey, true).apply()
-
-        Toast.makeText(this, "请允许 LanCall 通知，否则后台/来电弹窗不稳定", Toast.LENGTH_LONG).show()
-        try {
-            val i = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-            }
-            startActivity(i)
-        } catch (_: Throwable) {
-            runCatching {
-                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:$packageName")
-                })
-            }
-        }
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_PERMS_ALL) refresh()
-    }
-
     private fun refresh() {
         val serviceOn = Prefs.isServiceEnabled(this)
         val connected = ConnectionState.isConnected(this)
         val hfpYes = Prefs.getHfpSupport(this) == "YES"
 
-        // 模式A：不再用 connected 禁用（避免按钮变灰/体验不可预知）
-        modeAdapter.enableLan = serviceOn
-        modeAdapter.enableBt = serviceOn && hfpYes
+        // 模式是否可选：这里先保留你原逻辑
+        modeAdapter.enableLan = serviceOn && connected
+        modeAdapter.enableBt = serviceOn && connected && hfpYes
         modeAdapter.notifyDataSetChanged()
 
+        // ✅ 模式A：测试 INVITE 不要依赖 connected（避免变灰）
         btnTestInvite.isEnabled = serviceOn
 
         val localIp = runCatching { NetUtils.getLocalWifiIp(this) }.getOrDefault("")
@@ -319,17 +199,12 @@ class MainActivity : Activity() {
             if (ts <= 0) -1 else ((System.currentTimeMillis() - ts) / 1000).toInt()
         }
 
-        val notifEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
-        val micGranted = if (Build.VERSION.SDK_INT < 23) true else hasPerm(Manifest.permission.RECORD_AUDIO)
-
         tip.text = buildString {
             append("本机：${if (hasSim) "有卡手机" else "无卡手机"}\n")
             append("常驻服务：${if (serviceOn) "开" else "关"}\n")
             append("连接状态：${if (connected) "已连接" else "未连接"}")
             if (seenAgoSec >= 0) append("（$seenAgoSec 秒前）")
             append("\n")
-            append("通知总开关：${if (notifEnabled) "允许" else "未允许"}\n")
-            append("麦克风权限：${if (micGranted) "已授权" else "未授权"}\n")
             append("对端IP(保存)：${Prefs.getPeerIp(this@MainActivity).ifBlank { "(空)" }}\n")
             append("对端IP(最近看到)：${Prefs.getPeerSeenIp(this@MainActivity).ifBlank { "(空)" }}\n")
             append("本机Wi‑Fi IP：${if (localIp.isBlank()) "(未获取到)" else localIp}\n")
