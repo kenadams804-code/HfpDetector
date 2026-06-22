@@ -24,14 +24,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <!-- ✅ 去掉 phoneCall（Android 14/15 很容易触发限制导致接听后进程重启） -->
+    <!-- <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" /> -->
 
     <!-- 扫码 -->
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- 蓝牙检测/模式（若未用也不影响） -->
+    <!-- 蓝牙检测/模式 -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+
+    <!-- ✅ 短信接收（有卡机用） -->
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
     <application
         android:allowBackup="true"
@@ -48,23 +52,18 @@
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
-        <activity
-            android:name=".SettingsActivity"
-            android:exported="false" />
-
-        <activity
-            android:name=".PairingActivity"
-            android:exported="false" />
-
+        <activity android:name=".SettingsActivity" android:exported="false" />
+        <activity android:name=".PairingActivity" android:exported="false" />
         <activity
             android:name=".ShowQrActivity"
             android:exported="false"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
-        <!-- 系统日志页（你要的） -->
-        <activity
-            android:name=".LogActivity"
-            android:exported="false" />
+        <activity android:name=".LogActivity" android:exported="false" />
+
+        <!-- ✅ 新增：通话记录/短信箱 -->
+        <activity android:name=".CallHistoryActivity" android:exported="false" />
+        <activity android:name=".SmsBoxActivity" android:exported="false" />
 
         <activity
             android:name=".MainActivity"
@@ -80,10 +79,11 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- ✅ 关键修复：只保留 microphone -->
         <service
             android:name=".AudioCallService"
             android:exported="false"
-            android:foregroundServiceType="microphone|phoneCall" />
+            android:foregroundServiceType="microphone" />
 
         <service
             android:name=".MyCallScreeningService"
@@ -93,6 +93,16 @@
                 <action android:name="android.telecom.CallScreeningService" />
             </intent-filter>
         </service>
+
+        <!-- ✅ 新增：接收运营商短信 -->
+        <receiver
+            android:name=".SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>
