@@ -24,7 +24,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <!-- ✅ 去掉 phoneCall（Android 14/15 很容易触发限制导致接听后进程重启） -->
+    <!-- ✅ 关键：不要 phoneCall（Android 14/15 容易导致接听后进程重启） -->
     <!-- <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" /> -->
 
     <!-- 扫码 -->
