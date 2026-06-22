@@ -1,6 +1,7 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'kotlin-kapt'
 }
 
 def ksPath = System.getenv("SIGNING_KEYSTORE_PATH") ?: ""
@@ -10,21 +11,13 @@ def keyPass = System.getenv("SIGNING_KEY_PASSWORD") ?: ""
 
 android {
     namespace 'com.example.hfpdetector'
-
-    // ✅ Android 15 是 35。你现在是 34（Android 14）。
-    // 如果你的构建环境还没装 35，也可以先继续用 34，不影响在 Android 15 上运行。
     compileSdk 34
 
     defaultConfig {
         applicationId "com.example.hfpdetector"
-
-        // ✅ 推荐：兼容到 Android 6+
-        minSdk 23
-
-        // ✅ 面向 Android 15
+        minSdk 29
         targetSdk 34
 
-        // 每次发布都要 +1
         versionCode 4
         versionName "3.1"
     }
@@ -66,4 +59,9 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+
+    // ✅ Room（App 内通话记录/短信箱）
+    implementation "androidx.room:room-runtime:2.6.1"
+    kapt "androidx.room:room-compiler:2.6.1"
+    implementation "androidx.room:room-ktx:2.6.1"
 }
