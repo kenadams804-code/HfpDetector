@@ -72,13 +72,13 @@ class CoreService : Service() {
     @Volatile private var peerIp: InetAddress? = null
     @Volatile private var peerControlPort: Int = AppConfig.CONTROL_PORT
 
+    // 有卡机发 INVITE 时生成（等 ACCEPT 后用）
     @Volatile private var myAudioPort: Int = 0
     @Volatile private var callId: String? = null
 
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
 
-    // 节流日志，避免刷屏
     private var lastPongLogTs: Long = 0
     private var lastPingLogTs: Long = 0
     private var lastHelloLogTs: Long = 0
@@ -152,7 +152,6 @@ class CoreService : Service() {
     private fun startNetworking() {
         socket = DatagramSocket(AppConfig.CONTROL_PORT).apply { broadcast = true }
 
-        // 接收线程
         thread(name = "ctrl-recv") {
             val buf = ByteArray(8192)
             while (running) {
@@ -166,7 +165,6 @@ class CoreService : Service() {
         }
 
         if (!isHasSimReady()) {
-            // 无卡机：只在“未连接”时广播 HELLO（连接后停发，避免拖慢全网）
             if (!Prefs.isManualPairEnabled(this)) {
                 acquireMulticast()
                 startHelloBroadcastSmart()
@@ -191,11 +189,6 @@ class CoreService : Service() {
         }
     }
 
-    /**
-     * ✅ 自适应心跳：
-     * - 未连接：2 秒一次（快速建立在线）
-     * - 已连接：30 秒一次（极低流量）
-     */
     private fun startPingLoopAdaptive() {
         thread(name = "ping-loop") {
             while (running) {
@@ -228,17 +221,11 @@ class CoreService : Service() {
         }
     }
 
-    /**
-     * ✅ 智能 HELLO 广播：
-     * - 仅在“未连接”时广播（避免全网卡顿）
-     * - 一旦连接上，就暂停广播（每 30 秒检查一次）
-     */
     private fun startHelloBroadcastSmart() {
         thread(name = "hello-bcast") {
             while (running) {
                 try {
                     if (ConnectionState.isConnected(this@CoreService)) {
-                        // 已连接：停发广播，避免占用 Wi‑Fi 空口
                         try { Thread.sleep(30_000) } catch (_: Throwable) {}
                         continue
                     }
@@ -268,8 +255,8 @@ class CoreService : Service() {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
 
         when (obj.optString("type")) {
+
             "HELLO" -> {
-                // 有卡机发现无卡机
                 if (isHasSimReady() && !Prefs.isManualPairEnabled(this)) {
                     peerIp = fromIp
                     peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
@@ -292,14 +279,6 @@ class CoreService : Service() {
                 }
             }
 
-            "PING_TEST" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress)
-                val nonce = obj.optString("nonce", "")
-                val resp = JSONObject().put("type", "PONG_TEST").put("nonce", nonce)
-                sendJson(fromIp, fromPort, resp)
-                AppLog.i(this, "收到 PING_TEST，已回复 PONG_TEST -> ${fromIp.hostAddress}:$fromPort")
-            }
-
             "INVITE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
 
@@ -314,9 +293,12 @@ class CoreService : Service() {
                     .put("callId", cid)
                     .put("test", isTest)
 
-                // 回 ACK：双端口保险
                 sendJson(fromIp, fromPort, ack)
                 sendJson(fromIp, senderCtrlPort, ack)
+
+                // ✅ 去重：同一个 callId 的重复 INVITE 不要反复弹/反复响
+                val current = CallState.incoming
+                if (current?.callId == cid) return
 
                 CallState.incoming = PendingInvite(
                     callId = cid,
@@ -337,7 +319,53 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
-            // 你后续可以继续加 ACCEPT/DECLINE/HANGUP 等处理
+            /**
+             * ✅ 关键补齐：有卡机收到 ACCEPT 后，必须启动 AudioCallService
+             */
+            "ACCEPT" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val cid = obj.optString("callId", "")
+                val peerAudioPort = obj.optInt("audioPort", 0)
+
+                AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
+
+                // 可选：校验 callId（不一致也可以先允许）
+                val myCid = callId
+                if (myCid != null && cid.isNotBlank() && cid != myCid) {
+                    AppLog.i(this, "有卡端：ACCEPT callId 不匹配（my=$myCid peer=$cid），仍尝试启动对讲")
+                }
+
+                if (peerAudioPort <= 0 || myAudioPort <= 0) {
+                    AppLog.i(this, "有卡端：音频端口异常，无法启动对讲 myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
+                    return
+                }
+
+                try {
+                    AudioCallService.start(
+                        context = this,
+                        peerIp = fromIp.hostAddress,
+                        peerAudioPort = peerAudioPort,
+                        myAudioPort = myAudioPort
+                    )
+                    AppLog.i(this, "有卡端：已启动 AudioCallService myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
+                } catch (t: Throwable) {
+                    AppLog.i(this, "有卡端：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
+                }
+            }
+
+            "DECLINE" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                AppLog.i(this, "有卡端：收到 DECLINE <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
+            }
+
+            "HANGUP" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
+                // 结束对讲
+                try {
+                    stopService(Intent(this, AudioCallService::class.java))
+                } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -375,14 +403,13 @@ class CoreService : Service() {
                 .put("controlPort", AppConfig.CONTROL_PORT)
                 .put("test", isTest)
 
-            // UDP 丢包常见：重发三次
             val delays = longArrayOf(0, 120, 300)
             for (d in delays) {
                 try { Thread.sleep(d) } catch (_: Throwable) {}
                 sendJson(peer, peerControlPort, obj)
             }
 
-            AppLog.i(this, "有卡端：发送 INVITE x3 -> ${peer.hostAddress} number=$number test=$isTest")
+            AppLog.i(this, "有卡端：发送 INVITE x3 -> ${peer.hostAddress} number=$number test=$isTest myAudioPort=$myAudioPort")
         }
     }
 
@@ -462,9 +489,7 @@ class CoreService : Service() {
                 @Suppress("DEPRECATION")
                 getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             }
-        } catch (_: Throwable) {
-            null
-        }
+        } catch (_: Throwable) { null }
     }
 
     private fun startVibrateLoop() {
