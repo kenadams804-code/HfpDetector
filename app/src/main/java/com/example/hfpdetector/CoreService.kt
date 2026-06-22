@@ -81,6 +81,7 @@ class CoreService : Service() {
     // 节流日志，避免刷屏
     private var lastPongLogTs: Long = 0
     private var lastPingLogTs: Long = 0
+    private var lastHelloLogTs: Long = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -165,13 +166,17 @@ class CoreService : Service() {
         }
 
         if (!isHasSimReady()) {
-            // 无卡机：广播 HELLO 供发现
-            acquireMulticast()
-            startHelloBroadcast()
-            AppLog.i(this, "接听端：开始广播 HELLO")
+            // 无卡机：只在“未连接”时广播 HELLO（连接后停发，避免拖慢全网）
+            if (!Prefs.isManualPairEnabled(this)) {
+                acquireMulticast()
+                startHelloBroadcastSmart()
+                AppLog.i(this, "接听端：开始智能广播 HELLO（未连接才发，连接后停发）")
+            } else {
+                AppLog.i(this, "接听端：已开启手动配对，跳过 HELLO 广播")
+            }
         } else {
-            AppLog.i(this, "有卡端：启动 PING 心跳")
-            startPingLoop()
+            AppLog.i(this, "有卡端：启动自适应 PING（未连=2s，已连=30s）")
+            startPingLoopAdaptive()
         }
     }
 
@@ -186,7 +191,12 @@ class CoreService : Service() {
         }
     }
 
-    private fun startPingLoop() {
+    /**
+     * ✅ 自适应心跳：
+     * - 未连接：2 秒一次（快速建立在线）
+     * - 已连接：30 秒一次（极低流量）
+     */
+    private fun startPingLoopAdaptive() {
         thread(name = "ping-loop") {
             while (running) {
                 try {
@@ -203,7 +213,9 @@ class CoreService : Service() {
                         }
                     }
                 } catch (_: Throwable) {}
-                Thread.sleep(2000)
+
+                val interval = if (ConnectionState.isConnected(this)) 30_000L else 2_000L
+                try { Thread.sleep(interval) } catch (_: Throwable) {}
             }
         }
     }
@@ -216,10 +228,21 @@ class CoreService : Service() {
         }
     }
 
-    private fun startHelloBroadcast() {
+    /**
+     * ✅ 智能 HELLO 广播：
+     * - 仅在“未连接”时广播（避免全网卡顿）
+     * - 一旦连接上，就暂停广播（每 30 秒检查一次）
+     */
+    private fun startHelloBroadcastSmart() {
         thread(name = "hello-bcast") {
             while (running) {
                 try {
+                    if (ConnectionState.isConnected(this@CoreService)) {
+                        // 已连接：停发广播，避免占用 Wi‑Fi 空口
+                        try { Thread.sleep(30_000) } catch (_: Throwable) {}
+                        continue
+                    }
+
                     val bcast = NetUtils.getBroadcastAddress(this@CoreService)
                         ?: InetAddress.getByName("255.255.255.255")
                     val obj = JSONObject()
@@ -228,8 +251,15 @@ class CoreService : Service() {
                     val data = obj.toString().toByteArray(Charsets.UTF_8)
                     val p = DatagramPacket(data, data.size, bcast, AppConfig.CONTROL_PORT)
                     socket?.send(p)
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastHelloLogTs > 20_000) {
+                        lastHelloLogTs = now
+                        AppLog.i(this, "接听端：广播 HELLO -> ${bcast.hostAddress}")
+                    }
                 } catch (_: Throwable) {}
-                Thread.sleep(AppConfig.HELLO_INTERVAL_MS)
+
+                try { Thread.sleep(AppConfig.HELLO_INTERVAL_MS) } catch (_: Throwable) {}
             }
         }
     }
@@ -239,6 +269,7 @@ class CoreService : Service() {
 
         when (obj.optString("type")) {
             "HELLO" -> {
+                // 有卡机发现无卡机
                 if (isHasSimReady() && !Prefs.isManualPairEnabled(this)) {
                     peerIp = fromIp
                     peerControlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
@@ -269,10 +300,6 @@ class CoreService : Service() {
                 AppLog.i(this, "收到 PING_TEST，已回复 PONG_TEST -> ${fromIp.hostAddress}:$fromPort")
             }
 
-            /**
-             * ✅ INVITE：收到就处理（不依赖 simState），并回 ACK
-             * ACK 回两个端口：fromPort + senderCtrlPort，排除“回错端口”
-             */
             "INVITE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
 
@@ -287,6 +314,7 @@ class CoreService : Service() {
                     .put("callId", cid)
                     .put("test", isTest)
 
+                // 回 ACK：双端口保险
                 sendJson(fromIp, fromPort, ack)
                 sendJson(fromIp, senderCtrlPort, ack)
 
@@ -309,7 +337,7 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
-            // 其它类型（你项目里已有 ACCEPT/HANGUP/DECLINE 可继续加回，这里不影响弹窗链路）
+            // 你后续可以继续加 ACCEPT/DECLINE/HANGUP 等处理
         }
     }
 
@@ -321,9 +349,6 @@ class CoreService : Service() {
         } catch (_: Throwable) {}
     }
 
-    /**
-     * ✅ INVITE 发送：后台线程 + 重发3次（避免 UDP 单包丢失）
-     */
     private fun handleInviteSend(number: String, isTest: Boolean) {
         if (!isHasSimReady()) {
             AppLog.i(this, "本机不是有卡端，忽略发送 INVITE")
@@ -350,6 +375,7 @@ class CoreService : Service() {
                 .put("controlPort", AppConfig.CONTROL_PORT)
                 .put("test", isTest)
 
+            // UDP 丢包常见：重发三次
             val delays = longArrayOf(0, 120, 300)
             for (d in delays) {
                 try { Thread.sleep(d) } catch (_: Throwable) {}
@@ -360,11 +386,6 @@ class CoreService : Service() {
         }
     }
 
-    /**
-     * 来电弹窗：先发 FullScreen 通知，再尝试 startActivity。
-     * 你现在看到“震动但不弹窗”，多数是 ROM/通知通道策略导致 FullScreen 不触发。
-     * 这里把关键状态写入日志，便于判断原因。
-     */
     private fun ringAndShowIncoming(number: String) {
         val fullScreenIntent = Intent(this, IncomingCallActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
