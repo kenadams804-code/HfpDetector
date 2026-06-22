@@ -107,7 +107,8 @@ class MainActivity : Activity() {
         btnPair.visibility = if (hasSim) View.VISIBLE else View.GONE
         btnShowQr.visibility = if (hasSim) View.GONE else View.VISIBLE
 
-        val root = LinearLayout(this).apply {
+        // ✅ 关键修改：外层 ScrollView，内部 content 竖向布局
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(title)
             addView(tip)
@@ -129,8 +130,28 @@ class MainActivity : Activity() {
             addView(btnCalls)
             addView(btnSms)
             addView(btnTestInvite)
+
+            // 给底部留点空白，避免最后一个按钮贴底不好按
+            addView(Space(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(24)
+                )
+            })
         }
-        setContentView(root)
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(
+                content,
+                ScrollView.LayoutParams(
+                    ScrollView.LayoutParams.MATCH_PARENT,
+                    ScrollView.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        setContentView(scroll)
 
         btnQuickSetup.setOnClickListener { requestAllRuntimePermissions(force = true) }
 
@@ -217,7 +238,6 @@ class MainActivity : Activity() {
             if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) need += Manifest.permission.BLUETOOTH_CONNECT
         }
 
-        // ✅ 只有有卡机才需要短信权限
         if (hasSim) {
             if (!hasPerm(Manifest.permission.RECEIVE_SMS)) need += Manifest.permission.RECEIVE_SMS
         }
@@ -238,7 +258,6 @@ class MainActivity : Activity() {
         val connected = ConnectionState.isConnected(this)
         val hfpYes = Prefs.getHfpSupport(this) == "YES"
 
-        // 模式A：避免按钮变灰（你要的“待机随时可点”）
         modeAdapter.enableLan = serviceOn
         modeAdapter.enableBt = serviceOn && hfpYes
         modeAdapter.notifyDataSetChanged()
