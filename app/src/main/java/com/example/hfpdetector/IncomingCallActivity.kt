@@ -57,8 +57,7 @@ class IncomingCallActivity : Activity() {
         }
 
         if (Build.VERSION.SDK_INT >= 26) {
-            getSystemService(KeyguardManager::class.java)
-                ?.requestDismissKeyguard(this, null)
+            getSystemService(KeyguardManager::class.java)?.requestDismissKeyguard(this, null)
         }
 
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
@@ -83,9 +82,7 @@ class IncomingCallActivity : Activity() {
         val center = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
-            )
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
 
         val tvNumber = TextView(this).apply {
@@ -107,7 +104,6 @@ class IncomingCallActivity : Activity() {
         center.addView(tvNumber)
         center.addView(tvHint)
 
-        // ===== 底部三按钮一排 =====
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -145,33 +141,28 @@ class IncomingCallActivity : Activity() {
 
         setContentView(root)
 
-        // 默认免提打开
         applySpeakerRoute(true)
 
-        btnLeft.setOnClickListener {
-            if (inCall) hangup() else decline()
-        }
+        btnLeft.setOnClickListener { if (inCall) hangup() else decline() }
 
         btnMid.setOnClickListener {
             speakerOn = !speakerOn
             tvMid.text = if (speakerOn) "免提：开" else "免提：关"
             applySpeakerRoute(speakerOn)
-            // 通话中也通知服务更新路由
             AudioCallService.setSpeaker(this, speakerOn)
         }
 
         btnRight.setOnClickListener { accept() }
     }
 
-    private fun label(t: String): TextView {
-        return TextView(this).apply {
+    private fun label(t: String): TextView =
+        TextView(this).apply {
             text = t
             textSize = 14f
             setTextColor(Color.WHITE)
             setPadding(0, dp(10), 0, 0)
             gravity = Gravity.CENTER
         }
-    }
 
     private fun accept() {
         if (Build.VERSION.SDK_INT >= 23 &&
@@ -187,37 +178,26 @@ class IncomingCallActivity : Activity() {
 
         HistoryStore.updateCallState(this, invite.callId, "ANSWERED")
 
-        // ✅ 启动本机对讲服务
         AudioCallService.setSpeaker(this, speakerOn)
-        AudioCallService.start(
-            context = this,
-            peerIp = invite.peerIp,
-            peerAudioPort = invite.peerAudioPort,
-            myAudioPort = myAudioPort
-        )
+        AudioCallService.start(this, invite.peerIp, invite.peerAudioPort, myAudioPort)
 
-        // ✅ ACCEPT 重发 x3（防 UDP 丢包；有卡机收不到 ACCEPT 就不会启动音频）
-        thread(name = "send-accept") {
-            val obj = JSONObject()
+        // ✅ ACCEPT 重发 x3
+        sendControlX3(
+            ip = invite.peerIp,
+            port = invite.peerControlPort,
+            json = JSONObject()
                 .put("type", "ACCEPT")
                 .put("callId", invite.callId)
                 .put("audioPort", myAudioPort)
-                .toString()
-
-            val delays = longArrayOf(0, 120, 300)
-            for (d in delays) {
-                try { Thread.sleep(d) } catch (_: Throwable) {}
-                sendControl(invite.peerIp, invite.peerControlPort, obj)
-            }
-            AppLog.i(this, "IncomingCallActivity：已发送 ACCEPT x3 -> ${invite.peerIp}:${invite.peerControlPort} myAudioPort=$myAudioPort peerAudioPort=${invite.peerAudioPort}")
-        }
+                .toString(),
+            tag = "ACCEPT"
+        )
 
         CoreService.stopRingingNow(this)
 
-        // UI 进入“通话中”
         inCall = true
         tvTop.text = "通话中"
-        tvHint.text = "正在局域网对讲…（看日志的音频流量）"
+        tvHint.text = "正在局域网对讲…"
         tvLeft.text = "挂断"
         tvRight.text = "已接听"
         btnRight.isEnabled = false
@@ -228,12 +208,16 @@ class IncomingCallActivity : Activity() {
         val invite = CallState.incoming ?: run { finish(); return }
         HistoryStore.updateCallState(this, invite.callId, "DECLINED")
 
-        val obj = JSONObject()
-            .put("type", "DECLINE")
-            .put("callId", invite.callId)
-            .toString()
-
-        sendControl(invite.peerIp, invite.peerControlPort, obj)
+        // ✅ DECLINE 重发 x3
+        sendControlX3(
+            ip = invite.peerIp,
+            port = invite.peerControlPort,
+            json = JSONObject()
+                .put("type", "DECLINE")
+                .put("callId", invite.callId)
+                .toString(),
+            tag = "DECLINE"
+        )
 
         CoreService.stopRingingNow(this)
         CallState.incoming = null
@@ -242,16 +226,24 @@ class IncomingCallActivity : Activity() {
 
     private fun hangup() {
         val invite = CallState.incoming
+
         if (invite != null) {
             HistoryStore.updateCallState(this, invite.callId, "ENDED")
-            val obj = JSONObject()
-                .put("type", "HANGUP")
-                .put("callId", invite.callId)
-                .toString()
-            sendControl(invite.peerIp, invite.peerControlPort, obj)
+
+            // ✅ HANGUP 重发 x3（关键：保证有卡机一定停掉 AudioCallService）
+            sendControlX3(
+                ip = invite.peerIp,
+                port = invite.peerControlPort,
+                json = JSONObject()
+                    .put("type", "HANGUP")
+                    .put("callId", invite.callId)
+                    .toString(),
+                tag = "HANGUP"
+            )
         }
 
-        try { stopService(Intent(this, AudioCallService::class.java)) } catch (_: Throwable) {}
+        // 停本机对讲
+        try { AudioCallService.stop(this) } catch (_: Throwable) {}
         CallState.incoming = null
         finish()
     }
@@ -267,7 +259,18 @@ class IncomingCallActivity : Activity() {
         }
     }
 
-    private fun sendControl(ip: String, port: Int, json: String) {
+    private fun sendControlX3(ip: String, port: Int, json: String, tag: String) {
+        thread(name = "send-$tag") {
+            val delays = longArrayOf(0, 120, 300)
+            for (d in delays) {
+                try { Thread.sleep(d) } catch (_: Throwable) {}
+                sendControlOnce(ip, port, json)
+            }
+            AppLog.i(this, "IncomingCallActivity：已发送 $tag x3 -> $ip:$port")
+        }
+    }
+
+    private fun sendControlOnce(ip: String, port: Int, json: String) {
         try {
             val data = json.toByteArray(Charsets.UTF_8)
             DatagramSocket().use { s ->
@@ -282,8 +285,7 @@ class IncomingCallActivity : Activity() {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
             am.isSpeakerphoneOn = on
             if (Build.VERSION.SDK_INT >= 31) {
-                val speaker = am.availableCommunicationDevices
-                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                val speaker = am.availableCommunicationDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
                 if (speaker != null) {
                     if (on) am.setCommunicationDevice(speaker) else am.clearCommunicationDevice()
                 }
@@ -291,8 +293,8 @@ class IncomingCallActivity : Activity() {
         } catch (_: Throwable) {}
     }
 
-    private fun circleButton(bgColor: String, iconRes: Int): ImageButton {
-        return ImageButton(this).apply {
+    private fun circleButton(bgColor: String, iconRes: Int): ImageButton =
+        ImageButton(this).apply {
             setImageResource(iconRes)
             setColorFilter(Color.WHITE)
             background = GradientDrawable().apply {
@@ -301,10 +303,7 @@ class IncomingCallActivity : Activity() {
             }
             layoutParams = LinearLayout.LayoutParams(dp(84), dp(84))
             scaleType = ImageView.ScaleType.CENTER
-            isClickable = true
-            isFocusable = true
         }
-    }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 }
