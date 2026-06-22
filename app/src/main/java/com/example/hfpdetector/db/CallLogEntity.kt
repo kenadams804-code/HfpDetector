@@ -3,13 +3,14 @@ package com.example.hfpdetector.db
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "sms_box")
-data class SmsEntity(
-    @PrimaryKey val msgId: String,
-    val direction: String, // "IN"
-    val address: String,
-    val body: String,
+@Entity(tableName = "call_log")
+data class CallLogEntity(
+    @PrimaryKey val callId: String,
+    val direction: String, // "IN" / "OUT"
+    val number: String,
     val peerIp: String,
+    val isTest: Boolean,
+    val state: String,     // "RINGING" "ANSWERED" "DECLINED" "ENDED"
     val ts: Long,
-    val status: String     // "RECEIVED"
+    val lastUpdateTs: Long
 )
