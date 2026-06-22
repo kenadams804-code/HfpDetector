@@ -80,7 +80,7 @@ class MainActivity : Activity() {
         val (rowService, serviceSwitch, serviceIcon) = makeSettingSwitchRow(
             iconRes = android.R.drawable.ic_popup_sync,
             title = "常驻服务",
-            subtitle = "开=后台待机（来电/消息到达就触发）"
+            subtitle = "开=后台待机（来电/短信到达就触发）"
         )
         swService = serviceSwitch
         ivService = serviceIcon
@@ -94,12 +94,10 @@ class MainActivity : Activity() {
         }
 
         btnQuickSetup = Button(this).apply { text = "一键授权/准备（推荐）" }
-
         btnSettings = Button(this).apply { text = "设置（授权/检测/系统跳转）" }
         btnPair = Button(this).apply { text = "配对（有卡机：填IP/扫码）" }
         btnShowQr = Button(this).apply { text = "显示二维码（无卡机）" }
         btnLog = Button(this).apply { text = "系统日志（连通性测试/导出诊断包）" }
-
         btnCalls = Button(this).apply { text = "通话记录（LanCall）" }
         btnSms = Button(this).apply { text = "短信箱（LanCall）" }
 
@@ -180,7 +178,6 @@ class MainActivity : Activity() {
             Toast.makeText(this, "已发送测试 INVITE（对方在线就会弹窗）", Toast.LENGTH_SHORT).show()
         }
 
-        // 启动时自动准备一次（缺权限才会弹）
         requestAllRuntimePermissions(force = false)
 
         if (Prefs.isServiceEnabled(this)) CoreService.start(this)
@@ -198,35 +195,29 @@ class MainActivity : Activity() {
         mainHandler.removeCallbacks(refreshRunnable)
     }
 
-    private fun hasPerm(p: String): Boolean {
-        return ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
-    }
+    private fun hasPerm(p: String): Boolean =
+        ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
 
     private fun requestAllRuntimePermissions(force: Boolean) {
         val askedKey = "asked_runtime_perms"
         if (!force && setupSp.getBoolean(askedKey, false)) {
-            // 已问过就不重复弹（除非你点“一键授权/准备”强制）
+            // 已问过就不重复弹
         }
 
         val need = mutableListOf<String>()
 
-        // Android 13+ 通知权限
         if (Build.VERSION.SDK_INT >= 33) {
             if (!hasPerm(Manifest.permission.POST_NOTIFICATIONS)) need += Manifest.permission.POST_NOTIFICATIONS
         }
 
-        // 麦克风（对讲）
         if (!hasPerm(Manifest.permission.RECORD_AUDIO)) need += Manifest.permission.RECORD_AUDIO
-
-        // 相机（扫码）
         if (!hasPerm(Manifest.permission.CAMERA)) need += Manifest.permission.CAMERA
 
-        // 蓝牙（BT 模式）
         if (Build.VERSION.SDK_INT >= 31) {
             if (!hasPerm(Manifest.permission.BLUETOOTH_CONNECT)) need += Manifest.permission.BLUETOOTH_CONNECT
         }
 
-        // ✅ 短信（只在有卡机需要）
+        // ✅ 只有有卡机才需要短信权限
         if (hasSim) {
             if (!hasPerm(Manifest.permission.RECEIVE_SMS)) need += Manifest.permission.RECEIVE_SMS
         }
@@ -237,11 +228,7 @@ class MainActivity : Activity() {
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_PERMS_ALL) refresh()
     }
@@ -251,12 +238,11 @@ class MainActivity : Activity() {
         val connected = ConnectionState.isConnected(this)
         val hfpYes = Prefs.getHfpSupport(this) == "YES"
 
-        // ✅ 模式A：不要用 connected 禁用按钮（避免“变灰/不可预知”）
+        // 模式A：避免按钮变灰（你要的“待机随时可点”）
         modeAdapter.enableLan = serviceOn
         modeAdapter.enableBt = serviceOn && hfpYes
         modeAdapter.notifyDataSetChanged()
 
-        // 测试 INVITE：只要服务开就能点
         btnTestInvite.isEnabled = serviceOn
 
         val localIp = runCatching { NetUtils.getLocalWifiIp(this) }.getOrDefault("")
@@ -289,11 +275,7 @@ class MainActivity : Activity() {
         ivService.setColorFilter(Color.parseColor(if (on) "#2E7D32" else "#9E9E9E"))
     }
 
-    private fun makeSettingSwitchRow(
-        iconRes: Int,
-        title: String,
-        subtitle: String
-    ): Triple<View, Switch, ImageView> {
+    private fun makeSettingSwitchRow(iconRes: Int, title: String, subtitle: String): Triple<View, Switch, ImageView> {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -302,9 +284,7 @@ class MainActivity : Activity() {
 
         val icon = ImageView(this).apply {
             setImageResource(iconRes)
-            layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply {
-                rightMargin = dp(14)
-            }
+            layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).apply { rightMargin = dp(14) }
         }
 
         val textBox = LinearLayout(this).apply {
