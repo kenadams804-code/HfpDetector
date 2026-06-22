@@ -107,9 +107,10 @@ class MainActivity : Activity() {
         btnPair.visibility = if (hasSim) View.VISIBLE else View.GONE
         btnShowQr.visibility = if (hasSim) View.GONE else View.VISIBLE
 
-        // ✅ 关键修改：外层 ScrollView，内部 content 竖向布局
+        // ✅ 内容布局（放到 ScrollView 里）
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+
             addView(title)
             addView(tip)
 
@@ -131,7 +132,6 @@ class MainActivity : Activity() {
             addView(btnSms)
             addView(btnTestInvite)
 
-            // 给底部留点空白，避免最后一个按钮贴底不好按
             addView(Space(this@MainActivity).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -140,13 +140,14 @@ class MainActivity : Activity() {
             })
         }
 
+        // ✅ 关键修复：用 FrameLayout.LayoutParams（ScrollView 是 FrameLayout 子类）
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             addView(
                 content,
-                ScrollView.LayoutParams(
-                    ScrollView.LayoutParams.MATCH_PARENT,
-                    ScrollView.LayoutParams.WRAP_CONTENT
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
                 )
             )
         }
