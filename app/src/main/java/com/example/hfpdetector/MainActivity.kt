@@ -70,7 +70,7 @@ class MainActivity : Activity() {
         val (rowService, serviceSwitch, serviceIcon) = makeSettingSwitchRow(
             iconRes = android.R.drawable.ic_popup_sync,
             title = "常驻服务",
-            subtitle = "开=后台工作（来电/连接可用）"
+            subtitle = "开=后台待机（来电/消息到达就触发）"
         )
         swService = serviceSwitch
         ivService = serviceIcon
@@ -131,7 +131,7 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val allow = modeAdapter.isEnabled(position)
                 if (!allow) {
-                    Toast.makeText(this@MainActivity, "当前不可用：请先配对/或蓝牙不支持", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "当前不可用：请先开启常驻服务/或蓝牙不支持", Toast.LENGTH_SHORT).show()
                     spinner.setSelection(lastGoodSelection)
                     return
                 }
@@ -149,7 +149,7 @@ class MainActivity : Activity() {
 
         btnTestInvite.setOnClickListener {
             CoreService.sendTestInvite(this)
-            Toast.makeText(this, "已发送测试 INVITE（看无卡机是否弹窗）", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已发送测试 INVITE（对方在线就会弹窗）", Toast.LENGTH_SHORT).show()
         }
 
         if (Prefs.isServiceEnabled(this)) CoreService.start(this)
@@ -172,12 +172,13 @@ class MainActivity : Activity() {
         val connected = ConnectionState.isConnected(this)
         val hfpYes = Prefs.getHfpSupport(this) == "YES"
 
-        modeAdapter.enableLan = serviceOn && connected
-        modeAdapter.enableBt = serviceOn && connected && hfpYes
+        // ✅ 模式A：不要用 connected 去禁用 LAN（避免按钮“变灰/不可预知”）
+        modeAdapter.enableLan = serviceOn
+        modeAdapter.enableBt = serviceOn && hfpYes
         modeAdapter.notifyDataSetChanged()
 
-        // 测试 INVITE 按钮：必须服务开 + 已连接
-        btnTestInvite.isEnabled = serviceOn && connected
+        // ✅ 测试 INVITE：只要服务开就可点（发出后靠 ACK/日志判断对方是否在线）
+        btnTestInvite.isEnabled = serviceOn
 
         val localIp = runCatching { NetUtils.getLocalWifiIp(this) }.getOrDefault("")
         val seenAgoSec = run {
