@@ -6,6 +6,7 @@ object AppConfig {
 
     const val CH_PERSIST = "lancall_persist"
     const val CH_CALL = "lancall_call_v2"
+    const val CH_ONGOING = "lancall_ongoing_v1"
     const val CH_MSG = "lancall_msg_v1"
 
     const val NID_PERSIST = 1001
