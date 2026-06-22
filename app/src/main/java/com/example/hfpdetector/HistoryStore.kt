@@ -8,16 +8,7 @@ import kotlin.concurrent.thread
 
 object HistoryStore {
 
-    fun upsertCall(
-        context: Context,
-        callId: String,
-        direction: String,
-        number: String,
-        peerIp: String,
-        isTest: Boolean,
-        state: String,
-        ts: Long = System.currentTimeMillis()
-    ) {
+    fun upsertCall(context: Context, callId: String, direction: String, number: String, peerIp: String, isTest: Boolean, state: String) {
         thread {
             try {
                 val now = System.currentTimeMillis()
@@ -29,7 +20,7 @@ object HistoryStore {
                         peerIp = peerIp,
                         isTest = isTest,
                         state = state,
-                        ts = ts,
+                        ts = now,
                         lastUpdateTs = now
                     )
                 )
@@ -45,7 +36,7 @@ object HistoryStore {
         }
     }
 
-    fun upsertSmsIn(context: Context, msgId: String, address: String, body: String, peerIp: String, status: String, ts: Long) {
+    fun insertSmsIn(context: Context, msgId: String, address: String, body: String, peerIp: String, ts: Long) {
         thread {
             try {
                 AppDb.get(context).smsDao().upsert(
@@ -56,7 +47,7 @@ object HistoryStore {
                         body = body,
                         peerIp = peerIp,
                         ts = ts,
-                        status = status
+                        status = "RECEIVED"
                     )
                 )
             } catch (_: Throwable) {}
