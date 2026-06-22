@@ -53,18 +53,6 @@ class IncomingCallActivity : Activity() {
         val invite = CallState.incoming ?: run { finish(); return }
         val number = invite.number.ifBlank { "未知号码" }
 
-        // 确保“来电记录”存在（INVITE 收到时 CoreService 也会写，这里再 upsert 一次也没问题）
-        HistoryStore.upsertCall(
-            context = this,
-            callId = invite.callId,
-            direction = "IN",
-            number = number,
-            peerIp = invite.peerIp,
-            isTest = false,
-            state = "RINGING",
-            ts = System.currentTimeMillis()
-        )
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#0E0E0E"))
@@ -161,7 +149,7 @@ class IncomingCallActivity : Activity() {
         )
 
         inCall = true
-        // 不 finish，避免“看起来退桌面”
+        // ✅ 不 finish，避免“看起来退桌面”
     }
 
     private fun decline() {
@@ -216,8 +204,7 @@ class IncomingCallActivity : Activity() {
         try {
             val data = json.toByteArray(Charsets.UTF_8)
             DatagramSocket().use { s ->
-                val p = DatagramPacket(data, data.size, InetAddress.getByName(ip), port)
-                s.send(p)
+                s.send(DatagramPacket(data, data.size, InetAddress.getByName(ip), port))
             }
         } catch (_: Throwable) {}
     }
