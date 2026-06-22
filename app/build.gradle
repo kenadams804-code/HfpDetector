@@ -13,7 +13,7 @@ android {
 
     // ✅ Android 15 是 35。你现在是 34（Android 14）。
     // 如果你的构建环境还没装 35，也可以先继续用 34，不影响在 Android 15 上运行。
-    compileSdk 35
+    compileSdk 34
 
     defaultConfig {
         applicationId "com.example.hfpdetector"
@@ -22,7 +22,7 @@ android {
         minSdk 23
 
         // ✅ 面向 Android 15
-        targetSdk 35
+        targetSdk 34
 
         // 每次发布都要 +1
         versionCode 4
