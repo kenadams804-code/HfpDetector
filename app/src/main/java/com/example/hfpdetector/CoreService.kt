@@ -511,19 +511,19 @@ class CoreService : Service() {
     }
 
     private fun buildPersistNotification(): Notification {
-        val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("LanCall")
-            .setContentText("正在后台运行")
-            .setOngoing(true)
-            .setContentIntent(open)
-            .build()
-    }
-
+    val open = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
+        .setSmallIcon(android.R.drawable.sym_call_incoming) // ✅ 换掉“上传箭头”
+        .setContentTitle("LanCall")
+        .setContentText("后台运行中")
+        .setOngoing(true)
+        .setSilent(true)
+        .setContentIntent(open)
+        .build()
+}
     private fun createChannels() {
         if (Build.VERSION.SDK_INT < 26) return
         nm.createNotificationChannel(
