@@ -3,9 +3,11 @@ package com.example.hfpdetector
 import android.content.Context
 import android.media.*
 import android.os.Build
+import android.os.Process
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import kotlin.concurrent.thread
 import kotlin.math.max
 
@@ -21,66 +23,167 @@ class AudioSession(
     private var audioTrack: AudioTrack? = null
     private var sock: DatagramSocket? = null
 
+    private var am: AudioManager? = null
+    private var prevMode: Int = AudioManager.MODE_NORMAL
+    private var prevSpeaker: Boolean = false
+
     fun start() {
+        if (running) return
         running = true
 
-        val am = context.getSystemService(AudioManager::class.java)
-        am.mode = AudioManager.MODE_IN_COMMUNICATION
-        am.isSpeakerphoneOn = true
+        try {
+            AppLog.i(context, "AudioSession：start peer=$peerIp:$peerAudioPort myPort=$myAudioPort")
 
-        val sampleRate = 16000
-        val inConfig = AudioFormat.CHANNEL_IN_MONO
-        val outConfig = AudioFormat.CHANNEL_OUT_MONO
-        val fmt = AudioFormat.ENCODING_PCM_16BIT
+            am = context.getSystemService(AudioManager::class.java)?.also { a ->
+                prevMode = a.mode
+                prevSpeaker = a.isSpeakerphoneOn
+                runCatching {
+                    a.mode = AudioManager.MODE_IN_COMMUNICATION
+                    a.isSpeakerphoneOn = true
+                }
+            }
 
-        val minIn = AudioRecord.getMinBufferSize(sampleRate, inConfig, fmt)
-        val minOut = AudioTrack.getMinBufferSize(sampleRate, outConfig, fmt)
+            val sampleRate = 16000
+            val inConfig = AudioFormat.CHANNEL_IN_MONO
+            val outConfig = AudioFormat.CHANNEL_OUT_MONO
+            val fmt = AudioFormat.ENCODING_PCM_16BIT
 
-        val recBuf = max(minIn, 2048)
-        val playBuf = max(minOut, 2048)
+            val minIn = AudioRecord.getMinBufferSize(sampleRate, inConfig, fmt)
+            val minOut = AudioTrack.getMinBufferSize(sampleRate, outConfig, fmt)
 
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            sampleRate,
-            inConfig,
-            fmt,
-            recBuf * 2
-        )
+            val recBuf = max(minIn, 2048)
+            val playBuf = max(minOut, 2048)
 
-        audioTrack = if (Build.VERSION.SDK_INT >= 21) {
-            val attr = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val af = AudioFormat.Builder()
-                .setEncoding(fmt)
-                .setSampleRate(sampleRate)
-                .setChannelMask(outConfig)
-                .build()
-            AudioTrack(attr, af, playBuf * 2, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
-        } else {
-            @Suppress("DEPRECATION")
-            AudioTrack(AudioManager.STREAM_VOICE_CALL, sampleRate, outConfig, fmt, playBuf * 2, AudioTrack.MODE_STREAM)
+            // --- AudioRecord：先尝试 VOICE_COMMUNICATION，失败则降级 MIC ---
+            audioRecord = tryCreateAudioRecord(
+                source = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRate = sampleRate,
+                inConfig = inConfig,
+                fmt = fmt,
+                bufferBytes = recBuf * 2
+            ) ?: tryCreateAudioRecord(
+                source = MediaRecorder.AudioSource.MIC,
+                sampleRate = sampleRate,
+                inConfig = inConfig,
+                fmt = fmt,
+                bufferBytes = recBuf * 2
+            )
+
+            val rec = audioRecord
+            if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
+                AppLog.i(context, "AudioSession：AudioRecord 初始化失败")
+                stop()
+                return
+            }
+
+            // --- AudioTrack ---
+            audioTrack = tryCreateAudioTrack(
+                sampleRate = sampleRate,
+                outConfig = outConfig,
+                fmt = fmt,
+                bufferBytes = playBuf * 2
+            )
+
+            val tr = audioTrack
+            if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
+                AppLog.i(context, "AudioSession：AudioTrack 初始化失败")
+                stop()
+                return
+            }
+
+            // --- UDP socket：更稳的 bind 写法 + reuseAddress ---
+            sock = try {
+                DatagramSocket(null).apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(myAudioPort))
+                }
+            } catch (t: Throwable) {
+                AppLog.i(context, "AudioSession：绑定 UDP 端口失败 myAudioPort=$myAudioPort err=${t.javaClass.simpleName} ${t.message}")
+                stop()
+                return
+            }
+
+            // start record/track（这两步也可能抛异常）
+            runCatching { rec.startRecording() }.onFailure {
+                AppLog.i(context, "AudioSession：startRecording 失败：${it.javaClass.simpleName} ${it.message}")
+                stop(); return
+            }
+            runCatching { tr.play() }.onFailure {
+                AppLog.i(context, "AudioSession：AudioTrack play 失败：${it.javaClass.simpleName} ${it.message}")
+                stop(); return
+            }
+
+            startSendLoop()
+            startRecvLoop()
+
+            AppLog.i(context, "AudioSession：已启动（send/recv 线程已起）")
+        } catch (t: Throwable) {
+            // ✅ 兜底：任何异常都不允许把进程打崩
+            AppLog.i(context, "AudioSession：start 异常：${t.javaClass.simpleName} ${t.message}")
+            stop()
         }
+    }
 
-        sock = DatagramSocket(myAudioPort)
+    private fun tryCreateAudioRecord(
+        source: Int,
+        sampleRate: Int,
+        inConfig: Int,
+        fmt: Int,
+        bufferBytes: Int
+    ): AudioRecord? {
+        return try {
+            AudioRecord(
+                source,
+                sampleRate,
+                inConfig,
+                fmt,
+                bufferBytes
+            )
+        } catch (t: Throwable) {
+            AppLog.i(context, "AudioSession：AudioRecord 构造失败 source=$source err=${t.javaClass.simpleName} ${t.message}")
+            null
+        }
+    }
 
-        audioRecord?.startRecording()
-        audioTrack?.play()
-
-        startSendLoop()
-        startRecvLoop()
+    private fun tryCreateAudioTrack(
+        sampleRate: Int,
+        outConfig: Int,
+        fmt: Int,
+        bufferBytes: Int
+    ): AudioTrack? {
+        return try {
+            if (Build.VERSION.SDK_INT >= 21) {
+                val attr = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                val af = AudioFormat.Builder()
+                    .setEncoding(fmt)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(outConfig)
+                    .build()
+                AudioTrack(attr, af, bufferBytes, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
+            } else {
+                @Suppress("DEPRECATION")
+                AudioTrack(AudioManager.STREAM_VOICE_CALL, sampleRate, outConfig, fmt, bufferBytes, AudioTrack.MODE_STREAM)
+            }
+        } catch (t: Throwable) {
+            AppLog.i(context, "AudioSession：AudioTrack 构造失败 err=${t.javaClass.simpleName} ${t.message}")
+            null
+        }
     }
 
     private fun startSendLoop() {
         thread(name = "aud-send") {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+
             val rec = audioRecord ?: return@thread
             val s = sock ?: return@thread
-            val peerAddr = InetAddress.getByName(peerIp)
-            val buf = ByteArray(640) // 20ms @16kHz mono 16-bit => 320 samples => 640 bytes
+            val peerAddr = runCatching { InetAddress.getByName(peerIp) }.getOrNull() ?: return@thread
+            val buf = ByteArray(640) // 20ms
 
             while (running) {
-                val n = rec.read(buf, 0, buf.size)
+                val n = runCatching { rec.read(buf, 0, buf.size) }.getOrDefault(0)
                 if (n > 0) {
                     try {
                         val p = DatagramPacket(buf, n, peerAddr, peerAudioPort)
@@ -93,10 +196,13 @@ class AudioSession(
 
     private fun startRecvLoop() {
         thread(name = "aud-recv") {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+
             val tr = audioTrack ?: return@thread
             val s = sock ?: return@thread
             val buf = ByteArray(1500)
             val p = DatagramPacket(buf, buf.size)
+
             while (running) {
                 try {
                     s.receive(p)
@@ -108,6 +214,7 @@ class AudioSession(
 
     fun stop() {
         running = false
+
         try { sock?.close() } catch (_: Throwable) {}
         sock = null
 
@@ -118,5 +225,12 @@ class AudioSession(
         try { audioTrack?.stop() } catch (_: Throwable) {}
         try { audioTrack?.release() } catch (_: Throwable) {}
         audioTrack = null
+
+        // 恢复 AudioManager
+        runCatching {
+            am?.mode = prevMode
+            am?.isSpeakerphoneOn = prevSpeaker
+        }
+        am = null
     }
 }
