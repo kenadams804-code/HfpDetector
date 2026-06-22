@@ -1,5 +1,6 @@
 package com.example.hfpdetector
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -16,6 +18,7 @@ import android.os.IBinder
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.telecom.TelecomManager
 import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -35,7 +38,6 @@ class CoreService : Service() {
         private const val ACTION_INCOMING_PSTN = "CoreService.INCOMING_PSTN"
         private const val ACTION_STOP_RING = "CoreService.STOP_RING"
         private const val ACTION_TEST_INVITE = "CoreService.TEST_INVITE"
-
         private const val ACTION_FORWARD_SMS = "CoreService.FORWARD_SMS"
 
         fun start(context: Context) {
@@ -164,6 +166,46 @@ class CoreService : Service() {
         val tm = getSystemService(TelephonyManager::class.java)
         return tm?.simState == TelephonyManager.SIM_STATE_READY
     }
+
+    // ===== PSTN 控制（有卡机执行）=====
+    private fun hasAnswerPerm(): Boolean {
+        return try {
+            checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
+        } catch (_: Throwable) { false }
+    }
+
+    private fun pstnAnswerIfPossible() {
+        if (!isHasSimReady()) return
+        if (!hasAnswerPerm()) {
+            AppLog.i(this, "PSTN：缺少 ANSWER_PHONE_CALLS，无法接听（请在有卡机一键授权）")
+            return
+        }
+        try {
+            val tm = getSystemService(TelecomManager::class.java) ?: return
+            // 静音铃声避免继续响
+            runCatching { tm.silenceRinger() }
+            tm.acceptRingingCall()
+            AppLog.i(this, "PSTN：已执行 acceptRingingCall()")
+        } catch (t: Throwable) {
+            AppLog.i(this, "PSTN：接听失败：${t.javaClass.simpleName} ${t.message}")
+        }
+    }
+
+    private fun pstnEndIfPossible(reason: String) {
+        if (!isHasSimReady()) return
+        if (!hasAnswerPerm()) {
+            AppLog.i(this, "PSTN：缺少 ANSWER_PHONE_CALLS，无法挂断（请在有卡机一键授权）")
+            return
+        }
+        try {
+            val tm = getSystemService(TelecomManager::class.java) ?: return
+            val ok = tm.endCall()
+            AppLog.i(this, "PSTN：已执行 endCall() reason=$reason ok=$ok")
+        } catch (t: Throwable) {
+            AppLog.i(this, "PSTN：挂断失败：${t.javaClass.simpleName} ${t.message}")
+        }
+    }
+    // ================================
 
     private fun startNetworking() {
         socket = DatagramSocket(AppConfig.CONTROL_PORT).apply { broadcast = true }
@@ -317,7 +359,6 @@ class CoreService : Service() {
                     peerAudioPort = senderAudioPort
                 )
 
-                // ✅ 通话记录：来电响铃
                 HistoryStore.upsertCall(this, cid, "IN", number, fromIp.hostAddress, isTest, "RINGING")
 
                 AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
@@ -331,6 +372,7 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
+            // ✅ 无卡机接听：有卡机同时接听 PSTN + 启动对讲
             "ACCEPT" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
@@ -338,6 +380,9 @@ class CoreService : Service() {
 
                 AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
                 if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
+
+                // ✅ 接听运营商真实电话
+                pstnAnswerIfPossible()
 
                 if (peerAudioPort <= 0 || myAudioPort <= 0) {
                     AppLog.i(this, "有卡端：音频端口异常 myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
@@ -352,22 +397,30 @@ class CoreService : Service() {
                 }
             }
 
+            // ✅ 无卡机拒绝：有卡机挂断 PSTN
             "DECLINE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
                 if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "DECLINED")
                 AppLog.i(this, "有卡端：收到 DECLINE <- ${fromIp.hostAddress} callId=$cid")
+
+                pstnEndIfPossible("DECLINE")
             }
 
+            // ✅ 无卡机挂断：有卡机挂断 PSTN + 停对讲
             "HANGUP" -> {
-               Prefs.markPeerSeen(this, fromIp.hostAddress)
-               val cid = obj.optString("callId", "")
-               if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ENDED")
-               AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=$cid，停止对讲")
-             try { AudioCallService.stop(this) } catch (_: Throwable) {}
-           }
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val cid = obj.optString("callId", "")
+                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ENDED")
+                AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=$cid，停止对讲 + 挂断PSTN")
 
-            // ✅ 无卡机收到短信
+                pstnEndIfPossible("HANGUP")
+
+                try { AudioCallService.stop(this) } catch (_: Throwable) {}
+                callId = null
+                myAudioPort = 0
+            }
+
             "SMS" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val msgId = obj.optString("msgId", UUID.randomUUID().toString())
@@ -408,7 +461,6 @@ class CoreService : Service() {
             callId = cid
             myAudioPort = Random.nextInt(45000, 45999)
 
-            // ✅ 通话记录：有卡机这边记录“转发/外呼到无卡机”
             HistoryStore.upsertCall(this@CoreService, cid, "OUT", number, peer.hostAddress, isTest, "RINGING")
 
             val obj = JSONObject()
@@ -589,17 +641,9 @@ class CoreService : Service() {
 
     private fun createChannels() {
         if (Build.VERSION.SDK_INT < 26) return
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW)
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_MSG, "LanCall 短信", NotificationManager.IMPORTANCE_DEFAULT)
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(AppConfig.CH_ONGOING, "LanCall 通话中", NotificationManager.IMPORTANCE_LOW)
-        )
+        nm.createNotificationChannel(NotificationChannel(AppConfig.CH_PERSIST, "LanCall 常驻", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH))
+        nm.createNotificationChannel(NotificationChannel(AppConfig.CH_MSG, "LanCall 短信", NotificationManager.IMPORTANCE_DEFAULT))
+        nm.createNotificationChannel(NotificationChannel(AppConfig.CH_ONGOING, "LanCall 通话中", NotificationManager.IMPORTANCE_LOW))
     }
 }
