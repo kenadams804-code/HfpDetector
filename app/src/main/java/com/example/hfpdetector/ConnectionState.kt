@@ -5,7 +5,7 @@ import android.content.Context
 object ConnectionState {
 
     // 多久内收到对端回应算“已连接”
-    private const val CONNECT_VALID_MS = 10_000L
+    private const val CONNECT_VALID_MS = 120_000
 
     fun isConnected(context: Context): Boolean {
         val seen = Prefs.getPeerSeenTs(context)
