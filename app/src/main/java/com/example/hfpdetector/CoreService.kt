@@ -360,12 +360,12 @@ class CoreService : Service() {
             }
 
             "HANGUP" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress)
-                val cid = obj.optString("callId", "")
-                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ENDED")
-                AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=$cid")
-                try { stopService(Intent(this, AudioCallService::class.java)) } catch (_: Throwable) {}
-            }
+               Prefs.markPeerSeen(this, fromIp.hostAddress)
+               val cid = obj.optString("callId", "")
+               if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ENDED")
+               AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=$cid，停止对讲")
+             try { AudioCallService.stop(this) } catch (_: Throwable) {}
+           }
 
             // ✅ 无卡机收到短信
             "SMS" -> {
