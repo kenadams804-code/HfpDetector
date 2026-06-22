@@ -48,7 +48,7 @@ class AudioCallService : Service() {
                     val myAudioPort = intent.getIntExtra("myAudioPort", 0)
                     if (peerAudioPort == 0 || myAudioPort == 0) return START_NOT_STICKY
 
-                    startFgSafely()
+                    startFg()
 
                     session?.stop()
                     session = null
@@ -67,14 +67,14 @@ class AudioCallService : Service() {
             }
             START_STICKY
         } catch (t: Throwable) {
-            AppLog.i(this, "AudioCallService：崩溃兜底：${t.javaClass.simpleName} ${t.message}")
+            AppLog.i(this, "AudioCallService：兜底异常：${t.javaClass.simpleName} ${t.message}")
             try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
             stopSelf()
             START_NOT_STICKY
         }
     }
 
-    private fun startFgSafely() {
+    private fun startFg() {
         val n = NotificationCompat.Builder(this, AppConfig.CH_ONGOING)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentTitle("LanCall 通话中")
@@ -84,7 +84,6 @@ class AudioCallService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= 29) {
-            // ✅ 只使用 MICROPHONE（不要 PHONE_CALL）
             startForeground(AppConfig.NID_ONGOING, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(AppConfig.NID_ONGOING, n)
