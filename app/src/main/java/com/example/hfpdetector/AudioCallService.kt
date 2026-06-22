@@ -48,25 +48,13 @@ class AudioCallService : Service() {
                     val myAudioPort = intent.getIntExtra("myAudioPort", 0)
                     if (peerAudioPort == 0 || myAudioPort == 0) return START_NOT_STICKY
 
-                    // ✅ 防崩：前台启动包一层 try/catch
-                    if (!startFgSafely()) {
-                        AppLog.i(this, "AudioCallService：startForeground 失败，停止服务（避免进程崩溃）")
-                        stopSelf()
-                        return START_NOT_STICKY
-                    }
+                    startFgSafely()
 
                     session?.stop()
                     session = null
 
-                    try {
-                        session = AudioSession(this, peerIp, peerAudioPort, myAudioPort).also { it.start() }
-                        AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort peerIp=$peerIp")
-                    } catch (t: Throwable) {
-                        AppLog.i(this, "AudioCallService：AudioSession 启动失败：${t.javaClass.simpleName} ${t.message}")
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                        return START_NOT_STICKY
-                    }
+                    session = AudioSession(this, peerIp, peerAudioPort, myAudioPort).also { it.start() }
+                    AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort")
                 }
 
                 ACTION_STOP -> {
@@ -79,46 +67,34 @@ class AudioCallService : Service() {
             }
             START_STICKY
         } catch (t: Throwable) {
-            // ✅ 最后兜底：任何异常都写日志，避免“按接听就退桌面”
-            AppLog.i(this, "AudioCallService：onStartCommand 崩溃：${t.javaClass.simpleName} ${t.message}")
+            AppLog.i(this, "AudioCallService：崩溃兜底：${t.javaClass.simpleName} ${t.message}")
             try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
             stopSelf()
             START_NOT_STICKY
         }
     }
 
-    private fun startFgSafely(): Boolean {
-        return try {
-            val n = NotificationCompat.Builder(this, AppConfig.CH_ONGOING)
-                .setSmallIcon(android.R.drawable.sym_call_incoming)
-                .setContentTitle("LanCall 通话中")
-                .setContentText("局域网免提对讲进行中")
-                .setOngoing(true)
-                .setSilent(true)
-                .build()
+    private fun startFgSafely() {
+        val n = NotificationCompat.Builder(this, AppConfig.CH_ONGOING)
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setContentTitle("LanCall 通话中")
+            .setContentText("局域网免提对讲进行中")
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
 
-            if (Build.VERSION.SDK_INT >= 29) {
-                // ✅ 只用 MICROPHONE，别用 PHONE_CALL（很多系统会限制/导致异常）
-                val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                startForeground(AppConfig.NID_ONGOING, n, type)
-            } else {
-                startForeground(AppConfig.NID_ONGOING, n)
-            }
-            true
-        } catch (t: Throwable) {
-            AppLog.i(this, "AudioCallService：startForeground 异常：${t.javaClass.simpleName} ${t.message}")
-            false
+        if (Build.VERSION.SDK_INT >= 29) {
+            // ✅ 只使用 MICROPHONE（不要 PHONE_CALL）
+            startForeground(AppConfig.NID_ONGOING, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            startForeground(AppConfig.NID_ONGOING, n)
         }
     }
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT < 26) return
         nm.createNotificationChannel(
-            NotificationChannel(
-                AppConfig.CH_ONGOING,
-                "LanCall 通话中",
-                NotificationManager.IMPORTANCE_LOW
-            )
+            NotificationChannel(AppConfig.CH_ONGOING, "LanCall 通话中", NotificationManager.IMPORTANCE_LOW)
         )
     }
 
