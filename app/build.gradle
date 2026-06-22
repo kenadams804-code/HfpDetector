@@ -10,14 +10,23 @@ def keyPass = System.getenv("SIGNING_KEY_PASSWORD") ?: ""
 
 android {
     namespace 'com.example.hfpdetector'
-    compileSdk 34
+
+    // ✅ Android 15 是 35。你现在是 34（Android 14）。
+    // 如果你的构建环境还没装 35，也可以先继续用 34，不影响在 Android 15 上运行。
+    compileSdk 35
 
     defaultConfig {
         applicationId "com.example.hfpdetector"
-        minSdk 29
-        targetSdk 34
-        versionCode 3
-        versionName "3.0"
+
+        // ✅ 推荐：兼容到 Android 6+
+        minSdk 23
+
+        // ✅ 面向 Android 15
+        targetSdk 35
+
+        // 每次发布都要 +1
+        versionCode 4
+        versionName "3.1"
     }
 
     signingConfigs {
@@ -38,7 +47,6 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
-            // 关键：debug 也用同一套签名，这样你装 debug 也能覆盖升级
             signingConfig signingConfigs.release
             minifyEnabled false
         }
