@@ -7,7 +7,6 @@ import android.provider.Telephony
 import java.util.UUID
 
 class SmsReceiver : BroadcastReceiver() {
-
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
 
@@ -19,18 +18,10 @@ class SmsReceiver : BroadcastReceiver() {
         val ts = msgs.firstOrNull()?.timestampMillis ?: System.currentTimeMillis()
         val msgId = UUID.randomUUID().toString()
 
-        // 有卡机本地也存一份（LanCall 短信箱）
-        HistoryStore.upsertSmsIn(
-            context = context,
-            msgId = msgId,
-            address = address,
-            body = body,
-            peerIp = "(pstn)",
-            status = "RECEIVED",
-            ts = ts
-        )
+        // 本机（有卡机）先写入 LanCall 短信箱
+        HistoryStore.insertSmsIn(context, msgId, address, body, peerIp = "(pstn)", ts = ts)
 
-        // 转发到无卡机（由 CoreService 发 UDP）
+        // 转发给无卡机（UDP）
         CoreService.forwardSmsToPeer(context, msgId, address, body, ts)
     }
 }
