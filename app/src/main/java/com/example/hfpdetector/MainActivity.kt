@@ -240,7 +240,9 @@ class MainActivity : Activity() {
         }
 
         if (hasSim) {
-            if (!hasPerm(Manifest.permission.RECEIVE_SMS)) need += Manifest.permission.RECEIVE_SMS
+    if (!hasPerm(Manifest.permission.RECEIVE_SMS)) need += Manifest.permission.RECEIVE_SMS
+    if (!hasPerm(Manifest.permission.ANSWER_PHONE_CALLS)) need += Manifest.permission.ANSWER_PHONE_CALLS
+    if (!hasPerm(Manifest.permission.READ_PHONE_STATE)) need += Manifest.permission.READ_PHONE_STATE
         }
 
         if (need.isNotEmpty()) {
