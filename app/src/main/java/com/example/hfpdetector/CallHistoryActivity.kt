@@ -10,6 +10,7 @@ import java.util.*
 import kotlin.concurrent.thread
 
 class CallHistoryActivity : Activity() {
+
     private val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
     private lateinit var adapter: ArrayAdapter<String>
 
