@@ -36,6 +36,9 @@ class CoreService : Service() {
         private const val ACTION_STOP_RING = "CoreService.STOP_RING"
         private const val ACTION_TEST_INVITE = "CoreService.TEST_INVITE"
 
+        // ✅ 短信转发（从 SmsReceiver 进来）
+        private const val ACTION_FORWARD_SMS = "CoreService.FORWARD_SMS"
+
         fun start(context: Context) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_START)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
@@ -61,6 +64,15 @@ class CoreService : Service() {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_TEST_INVITE)
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
         }
+
+        fun forwardSmsToPeer(context: Context, msgId: String, address: String, body: String, ts: Long) {
+            val i = Intent(context, CoreService::class.java).setAction(ACTION_FORWARD_SMS)
+            i.putExtra("msgId", msgId)
+            i.putExtra("address", address)
+            i.putExtra("body", body)
+            i.putExtra("ts", ts)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
+        }
     }
 
     private lateinit var nm: NotificationManager
@@ -72,7 +84,6 @@ class CoreService : Service() {
     @Volatile private var peerIp: InetAddress? = null
     @Volatile private var peerControlPort: Int = AppConfig.CONTROL_PORT
 
-    // 有卡机发 INVITE 时生成（等 ACCEPT 后用）
     @Volatile private var myAudioPort: Int = 0
     @Volatile private var callId: String? = null
 
@@ -94,9 +105,7 @@ class CoreService : Service() {
         AppLog.i(this, "CoreService 启动")
         startNetworking()
 
-        if (isHasSimReady()) {
-            applyManualPairIfEnabled()
-        }
+        if (isHasSimReady()) applyManualPairIfEnabled()
     }
 
     override fun onDestroy() {
@@ -139,6 +148,14 @@ class CoreService : Service() {
             ACTION_TEST_INVITE -> {
                 AppLog.i(this, "手动触发：发送测试 INVITE")
                 handleInviteSend(number = "测试来电", isTest = true)
+            }
+
+            ACTION_FORWARD_SMS -> {
+                val msgId = intent.getStringExtra("msgId") ?: return START_STICKY
+                val address = intent.getStringExtra("address") ?: "未知号码"
+                val body = intent.getStringExtra("body") ?: ""
+                val ts = intent.getLongExtra("ts", System.currentTimeMillis())
+                handleForwardSms(msgId, address, body, ts)
             }
         }
         return START_STICKY
@@ -255,7 +272,6 @@ class CoreService : Service() {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
 
         when (obj.optString("type")) {
-
             "HELLO" -> {
                 if (isHasSimReady() && !Prefs.isManualPairEnabled(this)) {
                     peerIp = fromIp
@@ -288,15 +304,10 @@ class CoreService : Service() {
                 val senderCtrlPort = obj.optInt("controlPort", AppConfig.CONTROL_PORT)
                 val isTest = obj.optBoolean("test", false)
 
-                val ack = JSONObject()
-                    .put("type", "INVITE_ACK")
-                    .put("callId", cid)
-                    .put("test", isTest)
-
+                val ack = JSONObject().put("type", "INVITE_ACK").put("callId", cid).put("test", isTest)
                 sendJson(fromIp, fromPort, ack)
                 sendJson(fromIp, senderCtrlPort, ack)
 
-                // ✅ 去重：同一个 callId 的重复 INVITE 不要反复弹/反复响
                 val current = CallState.incoming
                 if (current?.callId == cid) return
 
@@ -307,6 +318,9 @@ class CoreService : Service() {
                     peerControlPort = senderCtrlPort,
                     peerAudioPort = senderAudioPort
                 )
+
+                // ✅ 写入“来电记录”
+                HistoryStore.upsertCall(this, cid, "IN", number, fromIp.hostAddress, isTest, "RINGING")
 
                 AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
 
@@ -319,9 +333,6 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
-            /**
-             * ✅ 关键补齐：有卡机收到 ACCEPT 后，必须启动 AudioCallService
-             */
             "ACCEPT" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
@@ -329,24 +340,15 @@ class CoreService : Service() {
 
                 AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
 
-                // 可选：校验 callId（不一致也可以先允许）
-                val myCid = callId
-                if (myCid != null && cid.isNotBlank() && cid != myCid) {
-                    AppLog.i(this, "有卡端：ACCEPT callId 不匹配（my=$myCid peer=$cid），仍尝试启动对讲")
-                }
+                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
 
                 if (peerAudioPort <= 0 || myAudioPort <= 0) {
-                    AppLog.i(this, "有卡端：音频端口异常，无法启动对讲 myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
+                    AppLog.i(this, "有卡端：音频端口异常 myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
                     return
                 }
 
                 try {
-                    AudioCallService.start(
-                        context = this,
-                        peerIp = fromIp.hostAddress,
-                        peerAudioPort = peerAudioPort,
-                        myAudioPort = myAudioPort
-                    )
+                    AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, myAudioPort)
                     AppLog.i(this, "有卡端：已启动 AudioCallService myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
                 } catch (t: Throwable) {
                     AppLog.i(this, "有卡端：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
@@ -355,16 +357,31 @@ class CoreService : Service() {
 
             "DECLINE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
-                AppLog.i(this, "有卡端：收到 DECLINE <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
+                val cid = obj.optString("callId", "")
+                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "DECLINED")
+                AppLog.i(this, "有卡端：收到 DECLINE <- ${fromIp.hostAddress} callId=$cid")
             }
 
             "HANGUP" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
-                AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
-                // 结束对讲
-                try {
-                    stopService(Intent(this, AudioCallService::class.java))
-                } catch (_: Throwable) {}
+                val cid = obj.optString("callId", "")
+                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ENDED")
+                AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=$cid")
+                try { stopService(Intent(this, AudioCallService::class.java)) } catch (_: Throwable) {}
+            }
+
+            // ✅ 收到短信（无卡机）
+            "SMS" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val msgId = obj.optString("msgId", UUID.randomUUID().toString())
+                val address = obj.optString("address", "未知号码")
+                val body = obj.optString("body", "")
+                val ts = obj.optLong("ts", System.currentTimeMillis())
+
+                HistoryStore.insertSmsIn(this, msgId, address, body, fromIp.hostAddress, ts)
+                showSmsNotification(address, body)
+
+                AppLog.i(this, "收到 SMS <- ${fromIp.hostAddress} from=$address len=${body.length}")
             }
         }
     }
@@ -395,6 +412,9 @@ class CoreService : Service() {
             callId = cid
             myAudioPort = Random.nextInt(45000, 45999)
 
+            // ✅ 写入“发起端记录”
+            HistoryStore.upsertCall(this@CoreService, cid, "OUT", number, peer.hostAddress, isTest, "RINGING")
+
             val obj = JSONObject()
                 .put("type", "INVITE")
                 .put("callId", cid)
@@ -410,6 +430,34 @@ class CoreService : Service() {
             }
 
             AppLog.i(this, "有卡端：发送 INVITE x3 -> ${peer.hostAddress} number=$number test=$isTest myAudioPort=$myAudioPort")
+        }
+    }
+
+    private fun handleForwardSms(msgId: String, address: String, body: String, ts: Long) {
+        if (!isHasSimReady()) return
+
+        thread(name = "send-sms") {
+            applyManualPairIfEnabled()
+            val peer = peerIp
+            if (peer == null) {
+                AppLog.i(this@CoreService, "短信转发：未找到接听端（对端不在线/未配对）")
+                return@thread
+            }
+
+            val obj = JSONObject()
+                .put("type", "SMS")
+                .put("msgId", msgId)
+                .put("address", address)
+                .put("body", body)
+                .put("ts", ts)
+
+            val delays = longArrayOf(0, 120, 300)
+            for (d in delays) {
+                try { Thread.sleep(d) } catch (_: Throwable) {}
+                sendJson(peer, peerControlPort, obj)
+            }
+
+            AppLog.i(this@CoreService, "短信转发：已发送 x3 -> ${peer.hostAddress} from=$address len=${body.length}")
         }
     }
 
@@ -455,6 +503,24 @@ class CoreService : Service() {
         }
 
         startRinging()
+    }
+
+    private fun showSmsNotification(address: String, body: String) {
+        try {
+            val open = PendingIntent.getActivity(
+                this, 0, Intent(this, SmsBoxActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val n = NotificationCompat.Builder(this, AppConfig.CH_MSG)
+                .setSmallIcon(android.R.drawable.sym_action_email)
+                .setContentTitle("新短信：$address")
+                .setContentText(body.take(60))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setAutoCancel(true)
+                .setContentIntent(open)
+                .build()
+            nm.notify(AppConfig.NID_MSG, n)
+        } catch (_: Throwable) {}
     }
 
     private fun startRinging() {
@@ -511,19 +577,20 @@ class CoreService : Service() {
     }
 
     private fun buildPersistNotification(): Notification {
-    val open = PendingIntent.getActivity(
-        this, 0, Intent(this, MainActivity::class.java),
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-    return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
-        .setSmallIcon(android.R.drawable.sym_call_incoming) // ✅ 换掉“上传箭头”
-        .setContentTitle("LanCall")
-        .setContentText("后台运行中")
-        .setOngoing(true)
-        .setSilent(true)
-        .setContentIntent(open)
-        .build()
-}
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, AppConfig.CH_PERSIST)
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setContentTitle("LanCall")
+            .setContentText("后台运行中")
+            .setOngoing(true)
+            .setSilent(true)
+            .setContentIntent(open)
+            .build()
+    }
+
     private fun createChannels() {
         if (Build.VERSION.SDK_INT < 26) return
         nm.createNotificationChannel(
@@ -531,6 +598,12 @@ class CoreService : Service() {
         )
         nm.createNotificationChannel(
             NotificationChannel(AppConfig.CH_CALL, "LanCall 来电", NotificationManager.IMPORTANCE_HIGH)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(AppConfig.CH_MSG, "LanCall 短信", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(AppConfig.CH_ONGOING, "LanCall 通话中", NotificationManager.IMPORTANCE_LOW)
         )
     }
 }
