@@ -18,10 +18,10 @@ class SmsReceiver : BroadcastReceiver() {
         val ts = msgs.firstOrNull()?.timestampMillis ?: System.currentTimeMillis()
         val msgId = UUID.randomUUID().toString()
 
-        // 本机（有卡机）先写入 LanCall 短信箱
+        // 有卡机自己也存一份（LanCall 短信箱）
         HistoryStore.insertSmsIn(context, msgId, address, body, peerIp = "(pstn)", ts = ts)
 
-        // 转发给无卡机（UDP）
+        // 转发到无卡机
         CoreService.forwardSmsToPeer(context, msgId, address, body, ts)
     }
 }
