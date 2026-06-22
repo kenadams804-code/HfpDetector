@@ -25,18 +25,10 @@ import kotlin.random.Random
 class IncomingCallActivity : Activity() {
 
     private var inCall = false
-    private var accepting = false
-
-    private lateinit var tvTop: TextView
-    private lateinit var tvHint: TextView
-    private lateinit var tvDecline: TextView
-    private lateinit var btnDecline: ImageButton
-    private lateinit var btnAccept: ImageButton
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 锁屏弹出/亮屏
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -50,21 +42,28 @@ class IncomingCallActivity : Activity() {
             )
         }
 
-        // 尝试解锁（不一定成功，但不影响显示）
         if (Build.VERSION.SDK_INT >= 26) {
             getSystemService(KeyguardManager::class.java)
                 ?.requestDismissKeyguard(this, null)
         }
 
-        // 暗色背景 + 轻微 dim
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.attributes = window.attributes.apply { dimAmount = 0.55f }
 
-        val invite = CallState.incoming ?: run {
-            finish()
-            return
-        }
+        val invite = CallState.incoming ?: run { finish(); return }
         val number = invite.number.ifBlank { "未知号码" }
+
+        // 确保“来电记录”存在（INVITE 收到时 CoreService 也会写，这里再 upsert 一次也没问题）
+        HistoryStore.upsertCall(
+            context = this,
+            callId = invite.callId,
+            direction = "IN",
+            number = number,
+            peerIp = invite.peerIp,
+            isTest = false,
+            state = "RINGING",
+            ts = System.currentTimeMillis()
+        )
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -72,18 +71,11 @@ class IncomingCallActivity : Activity() {
             setPadding(dp(22), dp(30), dp(22), dp(26))
         }
 
-        tvTop = TextView(this).apply {
+        val tvTop = TextView(this).apply {
             text = "来电"
             textSize = 28f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
-        }
-
-        val tvSub = TextView(this).apply {
-            text = "局域网接听（无卡手机）"
-            textSize = 14f
-            setTextColor(Color.parseColor("#BDBDBD"))
-            setPadding(0, dp(8), 0, 0)
         }
 
         val center = LinearLayout(this).apply {
@@ -102,7 +94,7 @@ class IncomingCallActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
-        tvHint = TextView(this).apply {
+        val tvHint = TextView(this).apply {
             text = "接听后开始两机免提对讲"
             textSize = 14f
             setTextColor(Color.parseColor("#BDBDBD"))
@@ -118,115 +110,37 @@ class IncomingCallActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
-        val leftCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
+        val btnDecline = circleButton("#D32F2F", android.R.drawable.ic_menu_close_clear_cancel)
+        val btnAccept = circleButton("#2E7D32", android.R.drawable.sym_action_call)
 
-        val rightCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        btnDecline = circleButton(
-            bgColor = "#D32F2F",
-            iconRes = android.R.drawable.ic_menu_close_clear_cancel
-        )
-        tvDecline = TextView(this).apply {
-            text = "拒绝"
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            setPadding(0, dp(10), 0, 0)
-            gravity = Gravity.CENTER
-        }
-
-        btnAccept = circleButton(
-            bgColor = "#2E7D32",
-            iconRes = android.R.drawable.sym_action_call
-        )
-        val tvAccept = TextView(this).apply {
-            text = "接听"
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            setPadding(0, dp(10), 0, 0)
-            gravity = Gravity.CENTER
-        }
-
-        leftCol.addView(btnDecline)
-        leftCol.addView(tvDecline)
-
-        rightCol.addView(btnAccept)
-        rightCol.addView(tvAccept)
-
-        bottom.addView(leftCol)
-        bottom.addView(rightCol)
+        bottom.addView(btnDecline)
+        bottom.addView(btnAccept)
 
         root.addView(tvTop)
-        root.addView(tvSub)
         root.addView(center)
         root.addView(bottom)
 
         setContentView(root)
 
         btnDecline.setOnClickListener {
-            if (inCall) {
-                AppLog.i(this, "IncomingCallActivity：点击挂断")
-                hangup()
-            } else {
-                AppLog.i(this, "IncomingCallActivity：点击拒绝")
-                decline()
-            }
+            if (inCall) hangup() else decline()
         }
-
-        btnAccept.setOnClickListener {
-            AppLog.i(this, "IncomingCallActivity：点击接听")
-            accept()
-        }
+        btnAccept.setOnClickListener { accept() }
     }
 
     private fun accept() {
-        if (accepting || inCall) return
-        accepting = true
-
-        // 麦克风权限
         if (Build.VERSION.SDK_INT >= 23 &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
         ) {
-            accepting = false
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 5001)
             return
         }
 
-        val invite = CallState.incoming ?: run {
-            accepting = false
-            finish()
-            return
-        }
-
-        // 进入“通话中”UI（不再 finish 退桌面）
-        enterInCallUi()
-
+        val invite = CallState.incoming ?: run { finish(); return }
         val myAudioPort = Random.nextInt(46000, 46999)
 
-        // 先停铃/震动
-        CoreService.stopRingingNow(this)
+        HistoryStore.updateCallState(this, invite.callId, "ANSWERED")
 
-        // 启动本机对讲服务
-        try {
-            AudioCallService.start(
-                context = this,
-                peerIp = invite.peerIp,
-                peerAudioPort = invite.peerAudioPort,
-                myAudioPort = myAudioPort
-            )
-            AppLog.i(this, "IncomingCallActivity：已启动 AudioCallService myAudioPort=$myAudioPort peerAudioPort=${invite.peerAudioPort}")
-        } catch (t: Throwable) {
-            AppLog.i(this, "IncomingCallActivity：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
-        }
-
-        // 回 ACCEPT 给有卡机（关键：有卡机收到后也要启动 AudioCallService，下面 CoreService 会加处理）
         sendControl(
             ip = invite.peerIp,
             port = invite.peerControlPort,
@@ -237,43 +151,22 @@ class IncomingCallActivity : Activity() {
                 .toString()
         )
 
-        // 不清空 CallState、不 finish：保持在界面上（像系统电话一样）
-        accepting = false
+        CoreService.stopRingingNow(this)
+
+        AudioCallService.start(
+            context = this,
+            peerIp = invite.peerIp,
+            peerAudioPort = invite.peerAudioPort,
+            myAudioPort = myAudioPort
+        )
+
         inCall = true
-    }
-
-    private fun enterInCallUi() {
-        tvTop.text = "通话中"
-        tvHint.text = "正在局域网对讲…"
-        tvDecline.text = "挂断"
-        btnAccept.isEnabled = false
-        btnAccept.alpha = 0.35f
-    }
-
-    private fun hangup() {
-        val invite = CallState.incoming
-        if (invite != null) {
-            sendControl(
-                ip = invite.peerIp,
-                port = invite.peerControlPort,
-                json = JSONObject()
-                    .put("type", "HANGUP")
-                    .put("callId", invite.callId)
-                    .toString()
-            )
-        }
-
-        // 停掉本机对讲服务（不依赖 AudioCallService 是否提供 stop 方法）
-        try {
-            stopService(Intent(this, AudioCallService::class.java))
-        } catch (_: Throwable) {}
-
-        CallState.incoming = null
-        finish()
+        // 不 finish，避免“看起来退桌面”
     }
 
     private fun decline() {
         val invite = CallState.incoming ?: run { finish(); return }
+        HistoryStore.updateCallState(this, invite.callId, "DECLINED")
 
         sendControl(
             ip = invite.peerIp,
@@ -289,19 +182,33 @@ class IncomingCallActivity : Activity() {
         finish()
     }
 
+    private fun hangup() {
+        val invite = CallState.incoming
+        if (invite != null) {
+            HistoryStore.updateCallState(this, invite.callId, "ENDED")
+            sendControl(
+                ip = invite.peerIp,
+                port = invite.peerControlPort,
+                json = JSONObject()
+                    .put("type", "HANGUP")
+                    .put("callId", invite.callId)
+                    .toString()
+            )
+        }
+
+        try { stopService(Intent(this, AudioCallService::class.java)) } catch (_: Throwable) {}
+        CallState.incoming = null
+        finish()
+    }
+
     override fun onBackPressed() {
         if (inCall) hangup() else decline()
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 5001) {
-            val ok = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            if (ok) accept() else AppLog.i(this, "IncomingCallActivity：麦克风权限被拒绝，无法接听")
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) accept()
         }
     }
 
@@ -323,10 +230,10 @@ class IncomingCallActivity : Activity() {
                 shape = GradientDrawable.OVAL
                 setColor(Color.parseColor(bgColor))
             }
-            layoutParams = LinearLayout.LayoutParams(dp(88), dp(88))
+            layoutParams = LinearLayout.LayoutParams(dp(88), dp(88)).apply {
+                marginEnd = dp(16)
+            }
             scaleType = ImageView.ScaleType.CENTER
-            isClickable = true
-            isFocusable = true
         }
     }
 
