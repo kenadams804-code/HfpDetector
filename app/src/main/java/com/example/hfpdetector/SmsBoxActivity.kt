@@ -6,14 +6,11 @@ import android.os.Bundle
 import android.widget.*
 import com.example.hfpdetector.db.AppDb
 import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.util.*
 import kotlin.concurrent.thread
 
 class SmsBoxActivity : Activity() {
-
     private val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
-    private lateinit var list: ListView
     private lateinit var adapter: ArrayAdapter<String>
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -35,7 +32,7 @@ class SmsBoxActivity : Activity() {
             addView(btnClear, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
 
-        list = ListView(this)
+        val list = ListView(this)
         adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
         list.adapter = adapter
 
@@ -64,10 +61,9 @@ class SmsBoxActivity : Activity() {
 
     private fun load() {
         thread {
-            val items = runCatching { AppDb.get(this).smsDao().listAll() }.getOrDefault(emptyList())
-            val lines = items.map {
-                val t = fmt.format(Date(it.ts))
-                "$t  ${it.address}  ${it.status}\n${it.body}"
+            val rows = runCatching { AppDb.get(this).smsDao().listAll() }.getOrDefault(emptyList())
+            val lines = rows.map {
+                "${fmt.format(Date(it.ts))}  ${it.address}\n${it.body}"
             }
             runOnUiThread {
                 adapter.clear()
