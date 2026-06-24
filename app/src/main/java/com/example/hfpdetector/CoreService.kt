@@ -427,6 +427,8 @@ class CoreService : Service() {
             "DECLINE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
+                acceptedCallIds.remove(cid)
+                
                 if (cid.isNotBlank()) {
                     HistoryStore.updateCallState(this, cid, "DECLINED")
                     audioPortByCallId.remove(cid)
