@@ -86,6 +86,7 @@ class CoreService : Service() {
 
     // ✅ 关键：每个 callId 对应的本端音频端口，避免多次 INVITE 覆盖 myAudioPort
     private val audioPortByCallId = ConcurrentHashMap<String, Int>()
+    private val acceptedCallIds = ConcurrentHashMap<String, Boolean>()
 
     @Volatile private var peerIp: InetAddress? = null
     @Volatile private var peerControlPort: Int = AppConfig.CONTROL_PORT
