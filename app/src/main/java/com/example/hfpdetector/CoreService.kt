@@ -40,6 +40,7 @@ class CoreService : Service() {
         private const val ACTION_STOP_RING = "CoreService.STOP_RING"
         private const val ACTION_TEST_INVITE = "CoreService.TEST_INVITE"
         private const val ACTION_FORWARD_SMS = "CoreService.FORWARD_SMS"
+        
 
         fun start(context: Context) {
             val i = Intent(context, CoreService::class.java).setAction(ACTION_START)
@@ -397,25 +398,31 @@ class CoreService : Service() {
                 val cid = obj.optString("callId", "")
                 val peerAudioPort = obj.optInt("audioPort", 0)
 
-                AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
-                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
-
-                // ✅ 接听 PSTN（若你仍保留这个功能）
-                pstnAnswerIfPossible()
-
-                val localPort = audioPortByCallId[cid] ?: myAudioPort
-                if (peerAudioPort <= 0 || localPort <= 0) {
-                    AppLog.i(this, "有卡端：音频端口异常 localPort=$localPort peerAudioPort=$peerAudioPort")
-                    return
+                // ✅ 去重：ACCEPT x3 只处理一次，避免重复启动 AudioSession 导致嗡鸣/爆音
+                if (cid.isNotBlank() && acceptedCallIds.putIfAbsent(cid, true) != null) {
+                AppLog.i(this, "有卡端：收到重复 ACCEPT，已忽略 callId=$cid")
+                return
                 }
 
-                try {
-                    AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, localPort)
-                    AppLog.i(this, "有卡端：已启动 AudioCallService localPort=$localPort peerAudioPort=$peerAudioPort")
-                } catch (t: Throwable) {
-                    AppLog.i(this, "有卡端：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
-                }
-            }
+               AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
+               if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
+
+               // ✅ 只有真的有运营商来电在响时才执行接听（避免测试INVITE也去动PSTN）
+               pstnAnswerIfPossible()
+
+              val localPort = audioPortByCallId[cid] ?: myAudioPort
+              if (peerAudioPort <= 0 || localPort <= 0) {
+              AppLog.i(this, "有卡端：音频端口异常 localPort=$localPort peerAudioPort=$peerAudioPort")
+              return
+              }
+
+             try {
+                 AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, localPort)
+                 AppLog.i(this, "有卡端：已启动 AudioCallService localPort=$localPort peerAudioPort=$peerAudioPort")
+             } catch (t: Throwable) {
+                 AppLog.i(this, "有卡端：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
+             }
+           }
 
             "DECLINE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
