@@ -9,6 +9,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import kotlin.concurrent.thread
+import kotlin.math.abs
 import kotlin.math.max
 
 class AudioSession(
@@ -25,6 +26,7 @@ class AudioSession(
 
     @Volatile private var sentBytes: Long = 0
     @Volatile private var recvBytes: Long = 0
+    @Volatile private var lastMicPeak: Int = 0
 
     fun start() {
         if (running) return
@@ -34,11 +36,24 @@ class AudioSession(
             AppLog.i(context, "AudioSession：start peer=$peerIp:$peerAudioPort myPort=$myAudioPort")
 
             val am = context.getSystemService(AudioManager::class.java)
+
+            // ✅ 强制通话模式 + 扬声器路由（Android 12/15）
             runCatching {
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
                 am.isSpeakerphoneOn = true
 
-                // ✅ 测试用：把通话音量拉到最大（避免“听不到其实是音量为0”）
+                if (Build.VERSION.SDK_INT >= 31) {
+                    val spk = am.availableCommunicationDevices
+                        .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    if (spk != null) {
+                        am.setCommunicationDevice(spk)
+                        AppLog.i(context, "AudioSession：setCommunicationDevice -> SPEAKER OK")
+                    } else {
+                        AppLog.i(context, "AudioSession：找不到 SPEAKER communicationDevice")
+                    }
+                }
+
+                // ✅ 把通话音量拉满（很多机子默认是0导致听不到）
                 val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
                 am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0)
             }
@@ -54,7 +69,6 @@ class AudioSession(
             val recBuf = max(minIn, 2048)
             val playBuf = max(minOut, 2048)
 
-            // ✅ 先 VOICE_COMMUNICATION，失败则 MIC
             audioRecord = runCatching {
                 AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate, inConfig, fmt, recBuf * 2)
             }.getOrNull()
@@ -71,21 +85,18 @@ class AudioSession(
                 stop(); return
             }
 
-            audioTrack = if (Build.VERSION.SDK_INT >= 21) {
-                val attr = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-                val af = AudioFormat.Builder()
-                    .setEncoding(fmt)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(outConfig)
-                    .build()
-                AudioTrack(attr, af, playBuf * 2, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
-            } else {
-                @Suppress("DEPRECATION")
-                AudioTrack(AudioManager.STREAM_VOICE_CALL, sampleRate, outConfig, fmt, playBuf * 2, AudioTrack.MODE_STREAM)
-            }
+            val attr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+
+            val af = AudioFormat.Builder()
+                .setEncoding(fmt)
+                .setSampleRate(sampleRate)
+                .setChannelMask(outConfig)
+                .build()
+
+            audioTrack = AudioTrack(attr, af, playBuf * 2, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
 
             val tr = audioTrack
             if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
@@ -93,7 +104,16 @@ class AudioSession(
                 stop(); return
             }
 
-            // ✅ UDP bind（更稳）
+            // ✅ 尽力把 AudioTrack 绑到扬声器设备（更稳）
+            runCatching {
+                val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                val spk = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                if (spk != null) {
+                    tr.preferredDevice = spk
+                    AppLog.i(context, "AudioSession：AudioTrack preferredDevice -> SPEAKER OK")
+                }
+            }
+
             sock = DatagramSocket(null).apply {
                 reuseAddress = true
                 bind(InetSocketAddress(myAudioPort))
@@ -103,6 +123,7 @@ class AudioSession(
                 AppLog.i(context, "AudioSession：startRecording 失败：${it.javaClass.simpleName} ${it.message}")
                 stop(); return
             }
+
             runCatching {
                 tr.play()
                 if (Build.VERSION.SDK_INT >= 21) tr.setVolume(1.0f) else @Suppress("DEPRECATION") tr.setStereoVolume(1f, 1f)
@@ -134,7 +155,8 @@ class AudioSession(
                 val dr = r - lastR
                 lastS = s
                 lastR = r
-                AppLog.i(context, "AudioSession：音频流量 发送=${ds}B/3s 接收=${dr}B/3s (totalS=$s totalR=$r)")
+                val peak = lastMicPeak
+                AppLog.i(context, "AudioSession：发送=${ds}B/3s 接收=${dr}B/3s micPeak=$peak (totalS=$s totalR=$r)")
             }
         }
     }
@@ -151,6 +173,17 @@ class AudioSession(
             while (running) {
                 val n = runCatching { rec.read(buf, 0, buf.size) }.getOrDefault(0)
                 if (n > 0) {
+                    // ✅ 计算录音峰值（判断是不是录到全0）
+                    var peak = 0
+                    var i = 0
+                    while (i + 1 < n) {
+                        val v = (buf[i].toInt() and 0xff) or (buf[i + 1].toInt() shl 8)
+                        val sv = if (v > 32767) v - 65536 else v
+                        peak = max(peak, abs(sv))
+                        i += 2
+                    }
+                    lastMicPeak = peak
+
                     try {
                         s.send(DatagramPacket(buf, n, peerAddr, peerAudioPort))
                         sentBytes += n.toLong()
