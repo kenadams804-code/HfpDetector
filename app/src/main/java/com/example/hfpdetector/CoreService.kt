@@ -405,13 +405,12 @@ class CoreService : Service() {
                 // ✅ 关键：接听运营商真实电话
                 pstnAnswerIfPossible()
 
-                if (peerAudioPort <= 0 || myAudioPort <= 0) {
-                    AppLog.i(this, "有卡端：音频端口异常 myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
-                    return
+               val localPort = audioPortByCallId[cid] ?: myAudioPort
+               if (peerAudioPort <= 0 || localPort <= 0) {
+               AppLog.i(this, "有卡端：音频端口异常 localPort=$localPort peerAudioPort=$peerAudioPort")
+               return
                 }
-
-                try {
-                    AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, myAudioPort)
+               AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, localPort)
                     AppLog.i(this, "有卡端：已启动 AudioCallService myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
                 } catch (t: Throwable) {
                     AppLog.i(this, "有卡端：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
