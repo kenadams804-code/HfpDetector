@@ -440,6 +440,8 @@ class CoreService : Service() {
             "HANGUP" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
+                acceptedCallIds.remove(cid)
+                
                 if (cid.isNotBlank()) {
                     HistoryStore.updateCallState(this, cid, "ENDED")
                     audioPortByCallId.remove(cid)
