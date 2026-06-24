@@ -45,11 +45,16 @@ class AudioSession(
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
                 am.isSpeakerphoneOn = true
 
-                // ✅ 不要一上来把音量拉满：容易产生声学回授“嗡鸣”
+                // ✅ 关键：确保麦克风不是静音状态（你现在 micPeak 很低，像是被静音）
+                am.isMicrophoneMute = false
+                AppLog.i(context, "AudioSession：isMicrophoneMute=${am.isMicrophoneMute}")
+
+                // ✅ 不要拉满音量（拉满非常容易啸叫/嗡鸣）
                 val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                val target = (maxVol * 0.6f).toInt().coerceAtLeast(1)
+                val target = (maxVol * 0.55f).toInt().coerceAtLeast(1)
                 am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0)
 
+                // Android 12+ 尽量锁到扬声器（你已验证可用）
                 if (Build.VERSION.SDK_INT >= 31) {
                     val spk = am.availableCommunicationDevices
                         .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
@@ -71,14 +76,22 @@ class AudioSession(
             val recBuf = max(minIn, 2048)
             val playBuf = max(minOut, 2048)
 
-            // ✅ VOICE_COMMUNICATION 优先，失败则 MIC
+            // ✅ VOICE_COMMUNICATION 优先（配合 AEC/NS/AGC）
             audioRecord = runCatching {
-                AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate, inConfig, fmt, recBuf * 2)
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    sampleRate, inConfig, fmt,
+                    recBuf * 2
+                )
             }.getOrNull()
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 audioRecord = runCatching {
-                    AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, inConfig, fmt, recBuf * 2)
+                    AudioRecord(
+                        MediaRecorder.AudioSource.MIC,
+                        sampleRate, inConfig, fmt,
+                        recBuf * 2
+                    )
                 }.getOrNull()
             }
 
@@ -88,7 +101,7 @@ class AudioSession(
                 stop(); return
             }
 
-            // ✅ 尽量选用内置麦克风（避免某些机型选错输入设备）
+            // ✅ 尽量选内置麦克风，避免输入设备选错
             runCatching {
                 if (Build.VERSION.SDK_INT >= 28) {
                     val mics = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
@@ -100,8 +113,9 @@ class AudioSession(
                 }
             }
 
-            // ✅ 启用系统音频效果：回声消除/降噪/自动增益（关键：抑制嗡鸣与回授）
+            // ✅ 开系统音频效果：回声消除/降噪/自动增益（抑制嗡鸣、让人声更可用）
             val sid = rec.audioSessionId
+
             runCatching {
                 if (AcousticEchoCanceler.isAvailable()) {
                     aec = AcousticEchoCanceler.create(sid)?.apply { enabled = true }
@@ -132,14 +146,20 @@ class AudioSession(
                 .setChannelMask(outConfig)
                 .build()
 
-            audioTrack = AudioTrack(attr, af, playBuf * 2, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
+            audioTrack = AudioTrack(
+                attr, af,
+                playBuf * 2,
+                AudioTrack.MODE_STREAM,
+                AudioManager.AUDIO_SESSION_ID_GENERATE
+            )
+
             val tr = audioTrack
             if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
                 AppLog.i(context, "AudioSession：AudioTrack 初始化失败")
                 stop(); return
             }
 
-            // ✅ 尽力把 AudioTrack 绑到扬声器
+            // ✅ 尽量把播放绑到扬声器
             runCatching {
                 val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
                 val spk = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
@@ -190,8 +210,7 @@ class AudioSession(
                 val dr = r - lastR
                 lastS = s
                 lastR = r
-                val peak = lastMicPeak
-                AppLog.i(context, "AudioSession：发送=${ds}B/3s 接收=${dr}B/3s micPeak=$peak (totalS=$s totalR=$r)")
+                AppLog.i(context, "AudioSession：发送=${ds}B/3s 接收=${dr}B/3s micPeak=$lastMicPeak (totalS=$s totalR=$r)")
             }
         }
     }
@@ -208,6 +227,7 @@ class AudioSession(
             while (running) {
                 val n = runCatching { rec.read(buf, 0, buf.size) }.getOrDefault(0)
                 if (n > 0) {
+                    // 录音峰值（判断你说话时有没有采到）
                     var peak = 0
                     var i = 0
                     while (i + 1 < n) {
