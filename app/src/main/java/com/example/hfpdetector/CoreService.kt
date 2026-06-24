@@ -38,6 +38,7 @@ class CoreService : Service() {
         private const val ACTION_INCOMING_PSTN = "CoreService.INCOMING_PSTN"
         private const val ACTION_STOP_RING = "CoreService.STOP_RING"
         private const val ACTION_TEST_INVITE = "CoreService.TEST_INVITE"
+
         private const val ACTION_FORWARD_SMS = "CoreService.FORWARD_SMS"
 
         fun start(context: Context) {
@@ -167,25 +168,35 @@ class CoreService : Service() {
         return tm?.simState == TelephonyManager.SIM_STATE_READY
     }
 
-    // ===== PSTN 控制（有卡机执行）=====
+    // ====== PSTN 控制（关键：让有卡机执行接听/挂断真实电话）======
     private fun hasAnswerPerm(): Boolean {
         return try {
-            checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
-        } catch (_: Throwable) { false }
+            if (Build.VERSION.SDK_INT >= 23) {
+                checkSelfPermission(Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
+            } else true
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     private fun pstnAnswerIfPossible() {
         if (!isHasSimReady()) return
+        if (Build.VERSION.SDK_INT < 26) {
+            AppLog.i(this, "PSTN：API<26，无法 acceptRingingCall()")
+            return
+        }
         if (!hasAnswerPerm()) {
             AppLog.i(this, "PSTN：缺少 ANSWER_PHONE_CALLS，无法接听（请在有卡机一键授权）")
             return
         }
         try {
-            val tm = getSystemService(TelecomManager::class.java) ?: return
-            // 静音铃声避免继续响
+            val tm = getSystemService(TelecomManager::class.java) ?: run {
+                AppLog.i(this, "PSTN：TelecomManager=null")
+                return
+            }
             runCatching { tm.silenceRinger() }
             tm.acceptRingingCall()
-            AppLog.i(this, "PSTN：已执行 acceptRingingCall()")
+            AppLog.i(this, "PSTN：已调用 acceptRingingCall()")
         } catch (t: Throwable) {
             AppLog.i(this, "PSTN：接听失败：${t.javaClass.simpleName} ${t.message}")
         }
@@ -193,19 +204,26 @@ class CoreService : Service() {
 
     private fun pstnEndIfPossible(reason: String) {
         if (!isHasSimReady()) return
+        if (Build.VERSION.SDK_INT < 28) {
+            AppLog.i(this, "PSTN：API<28，无法 endCall()")
+            return
+        }
         if (!hasAnswerPerm()) {
             AppLog.i(this, "PSTN：缺少 ANSWER_PHONE_CALLS，无法挂断（请在有卡机一键授权）")
             return
         }
         try {
-            val tm = getSystemService(TelecomManager::class.java) ?: return
+            val tm = getSystemService(TelecomManager::class.java) ?: run {
+                AppLog.i(this, "PSTN：TelecomManager=null")
+                return
+            }
             val ok = tm.endCall()
-            AppLog.i(this, "PSTN：已执行 endCall() reason=$reason ok=$ok")
+            AppLog.i(this, "PSTN：已调用 endCall() reason=$reason ok=$ok")
         } catch (t: Throwable) {
             AppLog.i(this, "PSTN：挂断失败：${t.javaClass.simpleName} ${t.message}")
         }
     }
-    // ================================
+    // =====================================================
 
     private fun startNetworking() {
         socket = DatagramSocket(AppConfig.CONTROL_PORT).apply { broadcast = true }
@@ -372,7 +390,7 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
-            // ✅ 无卡机接听：有卡机同时接听 PSTN + 启动对讲
+            // ✅ 无卡机点“接听”后：有卡机执行接听真实电话 + 启动对讲
             "ACCEPT" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
@@ -381,7 +399,7 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
                 if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
 
-                // ✅ 接听运营商真实电话
+                // ✅ 关键：接听运营商真实电话
                 pstnAnswerIfPossible()
 
                 if (peerAudioPort <= 0 || myAudioPort <= 0) {
@@ -397,7 +415,7 @@ class CoreService : Service() {
                 }
             }
 
-            // ✅ 无卡机拒绝：有卡机挂断 PSTN
+            // ✅ 无卡机点“拒绝”：有卡机挂断真实电话
             "DECLINE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
@@ -407,7 +425,7 @@ class CoreService : Service() {
                 pstnEndIfPossible("DECLINE")
             }
 
-            // ✅ 无卡机挂断：有卡机挂断 PSTN + 停对讲
+            // ✅ 无卡机点“挂断”：有卡机挂断真实电话 + 停对讲
             "HANGUP" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
