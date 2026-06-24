@@ -413,6 +413,11 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到重复 ACCEPT，已忽略 callId=$cid")
                 return
                 }
+                
+                if (cid.isBlank()) {
+                AppLog.i(this, "有卡端：收到 ACCEPT 但 callId 为空，忽略")
+                return
+                }
 
                AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
