@@ -147,6 +147,7 @@ class CoreService : Service() {
                 val num = intent.getStringExtra("number") ?: "未知号码"
                 AppLog.i(this, "收到系统来电回调：$num")
                 handleInviteSend(number = num, isTest = false)
+                audioPortByCallId[cid] = myAudioPort
             }
 
             ACTION_TEST_INVITE -> {
