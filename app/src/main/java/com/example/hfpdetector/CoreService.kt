@@ -432,28 +432,29 @@ class CoreService : Service() {
              }
            }
 
-            "DECLINE" -> {
-                Prefs.markPeerSeen(this, fromIp.hostAddress)
-                val cid = obj.optString("callId", "")
-                acceptedCallIds.remove(cid)
-                
-                if (cid.isNotBlank()) {
-                    HistoryStore.updateCallState(this, cid, "DECLINED")
-                    audioPortByCallId.remove(cid)
-                }
-                AppLog.i(this, "有卡端：收到 DECLINE <- ${fromIp.hostAddress} callId=$cid")
-                pstnEndIfPossible("DECLINE")
-            }
+             "DECLINE" -> {
+                 Prefs.markPeerSeen(this, fromIp.hostAddress)
+                 val cid = obj.optString("callId", "")
 
+                 if (cid.isNotBlank()) {
+                     acceptedCallIds.remove(cid)
+                     HistoryStore.updateCallState(this, cid, "DECLINED")
+                     audioPortByCallId.remove(cid)
+                 }
+
+                 AppLog.i(this, "有卡端：收到 DECLINE <- ${fromIp.hostAddress} callId=$cid")
+                 pstnEndIfPossible("DECLINE")
+           }
             "HANGUP" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
-                acceptedCallIds.remove(cid)
-                
+
                 if (cid.isNotBlank()) {
+                    acceptedCallIds.remove(cid)
                     HistoryStore.updateCallState(this, cid, "ENDED")
                     audioPortByCallId.remove(cid)
                 }
+
                 AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=$cid，停止对讲 + 挂断PSTN")
 
                 pstnEndIfPossible("HANGUP")
@@ -461,7 +462,7 @@ class CoreService : Service() {
                 try { AudioCallService.stop(this) } catch (_: Throwable) {}
                 callId = null
                 myAudioPort = 0
-            }
+          }
 
             "SMS" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
