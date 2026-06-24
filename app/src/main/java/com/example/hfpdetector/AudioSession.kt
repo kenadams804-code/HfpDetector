@@ -2,6 +2,9 @@ package com.example.hfpdetector
 
 import android.content.Context
 import android.media.*
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Process
 import java.net.DatagramPacket
@@ -45,16 +48,15 @@ class AudioSession(
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
                 am.isSpeakerphoneOn = true
 
-                // ✅ 关键：确保麦克风不是静音状态（你现在 micPeak 很低，像是被静音）
+                // 确保没静音
                 am.isMicrophoneMute = false
                 AppLog.i(context, "AudioSession：isMicrophoneMute=${am.isMicrophoneMute}")
 
-                // ✅ 不要拉满音量（拉满非常容易啸叫/嗡鸣）
+                // 不拉满音量（避免嗡鸣/啸叫）
                 val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
                 val target = (maxVol * 0.55f).toInt().coerceAtLeast(1)
                 am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0)
 
-                // Android 12+ 尽量锁到扬声器（你已验证可用）
                 if (Build.VERSION.SDK_INT >= 31) {
                     val spk = am.availableCommunicationDevices
                         .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
@@ -76,7 +78,6 @@ class AudioSession(
             val recBuf = max(minIn, 2048)
             val playBuf = max(minOut, 2048)
 
-            // ✅ VOICE_COMMUNICATION 优先（配合 AEC/NS/AGC）
             audioRecord = runCatching {
                 AudioRecord(
                     MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -101,7 +102,7 @@ class AudioSession(
                 stop(); return
             }
 
-            // ✅ 尽量选内置麦克风，避免输入设备选错
+            // 尽量选内置麦克风
             runCatching {
                 if (Build.VERSION.SDK_INT >= 28) {
                     val mics = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
@@ -113,7 +114,7 @@ class AudioSession(
                 }
             }
 
-            // ✅ 开系统音频效果：回声消除/降噪/自动增益（抑制嗡鸣、让人声更可用）
+            // 开系统音频效果：AEC/NS/AGC
             val sid = rec.audioSessionId
 
             runCatching {
@@ -122,12 +123,14 @@ class AudioSession(
                     AppLog.i(context, "AudioSession：AEC enabled=${aec?.enabled}")
                 } else AppLog.i(context, "AudioSession：AEC not available")
             }
+
             runCatching {
                 if (NoiseSuppressor.isAvailable()) {
                     ns = NoiseSuppressor.create(sid)?.apply { enabled = true }
                     AppLog.i(context, "AudioSession：NS enabled=${ns?.enabled}")
                 } else AppLog.i(context, "AudioSession：NS not available")
             }
+
             runCatching {
                 if (AutomaticGainControl.isAvailable()) {
                     agc = AutomaticGainControl.create(sid)?.apply { enabled = true }
@@ -159,7 +162,7 @@ class AudioSession(
                 stop(); return
             }
 
-            // ✅ 尽量把播放绑到扬声器
+            // 尽量把播放绑到扬声器
             runCatching {
                 val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
                 val spk = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
@@ -227,7 +230,6 @@ class AudioSession(
             while (running) {
                 val n = runCatching { rec.read(buf, 0, buf.size) }.getOrDefault(0)
                 if (n > 0) {
-                    // 录音峰值（判断你说话时有没有采到）
                     var peak = 0
                     var i = 0
                     while (i + 1 < n) {
