@@ -24,6 +24,10 @@ class AudioSession(
     private var audioTrack: AudioTrack? = null
     private var sock: DatagramSocket? = null
 
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
+    private var agc: AutomaticGainControl? = null
+
     @Volatile private var sentBytes: Long = 0
     @Volatile private var recvBytes: Long = 0
     @Volatile private var lastMicPeak: Int = 0
@@ -37,10 +41,14 @@ class AudioSession(
 
             val am = context.getSystemService(AudioManager::class.java)
 
-            // ✅ 强制通话模式 + 扬声器路由（Android 12/15）
             runCatching {
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
                 am.isSpeakerphoneOn = true
+
+                // ✅ 不要一上来把音量拉满：容易产生声学回授“嗡鸣”
+                val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+                val target = (maxVol * 0.6f).toInt().coerceAtLeast(1)
+                am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0)
 
                 if (Build.VERSION.SDK_INT >= 31) {
                     val spk = am.availableCommunicationDevices
@@ -48,14 +56,8 @@ class AudioSession(
                     if (spk != null) {
                         am.setCommunicationDevice(spk)
                         AppLog.i(context, "AudioSession：setCommunicationDevice -> SPEAKER OK")
-                    } else {
-                        AppLog.i(context, "AudioSession：找不到 SPEAKER communicationDevice")
                     }
                 }
-
-                // ✅ 把通话音量拉满（很多机子默认是0导致听不到）
-                val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0)
             }
 
             val sampleRate = 16000
@@ -69,6 +71,7 @@ class AudioSession(
             val recBuf = max(minIn, 2048)
             val playBuf = max(minOut, 2048)
 
+            // ✅ VOICE_COMMUNICATION 优先，失败则 MIC
             audioRecord = runCatching {
                 AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate, inConfig, fmt, recBuf * 2)
             }.getOrNull()
@@ -85,6 +88,39 @@ class AudioSession(
                 stop(); return
             }
 
+            // ✅ 尽量选用内置麦克风（避免某些机型选错输入设备）
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 28) {
+                    val mics = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                    val mic = mics.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+                    if (mic != null) {
+                        rec.preferredDevice = mic
+                        AppLog.i(context, "AudioSession：AudioRecord preferredDevice -> BUILTIN_MIC OK")
+                    }
+                }
+            }
+
+            // ✅ 启用系统音频效果：回声消除/降噪/自动增益（关键：抑制嗡鸣与回授）
+            val sid = rec.audioSessionId
+            runCatching {
+                if (AcousticEchoCanceler.isAvailable()) {
+                    aec = AcousticEchoCanceler.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession：AEC enabled=${aec?.enabled}")
+                } else AppLog.i(context, "AudioSession：AEC not available")
+            }
+            runCatching {
+                if (NoiseSuppressor.isAvailable()) {
+                    ns = NoiseSuppressor.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession：NS enabled=${ns?.enabled}")
+                } else AppLog.i(context, "AudioSession：NS not available")
+            }
+            runCatching {
+                if (AutomaticGainControl.isAvailable()) {
+                    agc = AutomaticGainControl.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession：AGC enabled=${agc?.enabled}")
+                } else AppLog.i(context, "AudioSession：AGC not available")
+            }
+
             val attr = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -97,14 +133,13 @@ class AudioSession(
                 .build()
 
             audioTrack = AudioTrack(attr, af, playBuf * 2, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
-
             val tr = audioTrack
             if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
                 AppLog.i(context, "AudioSession：AudioTrack 初始化失败")
                 stop(); return
             }
 
-            // ✅ 尽力把 AudioTrack 绑到扬声器设备（更稳）
+            // ✅ 尽力把 AudioTrack 绑到扬声器
             runCatching {
                 val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
                 val spk = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
@@ -173,7 +208,6 @@ class AudioSession(
             while (running) {
                 val n = runCatching { rec.read(buf, 0, buf.size) }.getOrDefault(0)
                 if (n > 0) {
-                    // ✅ 计算录音峰值（判断是不是录到全0）
                     var peak = 0
                     var i = 0
                     while (i + 1 < n) {
@@ -215,6 +249,7 @@ class AudioSession(
 
     fun stop() {
         running = false
+
         try { sock?.close() } catch (_: Throwable) {}
         sock = null
 
@@ -225,5 +260,10 @@ class AudioSession(
         try { audioTrack?.stop() } catch (_: Throwable) {}
         try { audioTrack?.release() } catch (_: Throwable) {}
         audioTrack = null
+
+        try { aec?.release() } catch (_: Throwable) {}
+        try { ns?.release() } catch (_: Throwable) {}
+        try { agc?.release() } catch (_: Throwable) {}
+        aec = null; ns = null; agc = null
     }
 }
