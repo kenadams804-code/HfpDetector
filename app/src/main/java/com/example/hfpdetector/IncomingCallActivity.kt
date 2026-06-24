@@ -28,7 +28,12 @@ import kotlin.random.Random
 class IncomingCallActivity : Activity() {
 
     private var inCall = false
+
+    // 免提开关：true=扬声器免提，false=听筒/非免提
     private var speakerOn = true
+
+    // 防误触：500ms 内不允许连续切换
+    private var lastSpeakerToggleTs: Long = 0L
 
     private lateinit var tvTop: TextView
     private lateinit var tvHint: TextView
@@ -43,6 +48,7 @@ class IncomingCallActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 锁屏弹出/亮屏
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -82,7 +88,9 @@ class IncomingCallActivity : Activity() {
         val center = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
         }
 
         val tvNumber = TextView(this).apply {
@@ -123,8 +131,9 @@ class IncomingCallActivity : Activity() {
         tvLeft = label("拒绝")
         leftCol.addView(btnLeft); leftCol.addView(tvLeft)
 
+        // 中间免提按钮：颜色由 updateSpeakerUi() 控制
         btnMid = circleButton("#424242", android.R.drawable.ic_btn_speak_now)
-        tvMid = label("免提：开")
+        tvMid = label("") // 先空，下面 updateSpeakerUi() 会填
         midCol.addView(btnMid); midCol.addView(tvMid)
 
         btnRight = circleButton("#2E7D32", android.R.drawable.sym_action_call)
@@ -141,18 +150,36 @@ class IncomingCallActivity : Activity() {
 
         setContentView(root)
 
-        applySpeakerRoute(true)
+        // 初始路由 + UI
+        applySpeakerRoute(speakerOn)
+        updateSpeakerUi()
 
         btnLeft.setOnClickListener { if (inCall) hangup() else decline() }
 
         btnMid.setOnClickListener {
+            val now = System.currentTimeMillis()
+            if (now - lastSpeakerToggleTs < 500) return@setOnClickListener
+            lastSpeakerToggleTs = now
+
             speakerOn = !speakerOn
-            tvMid.text = if (speakerOn) "免提：开" else "免提：关"
+            updateSpeakerUi()
             applySpeakerRoute(speakerOn)
+
+            // 通知 AudioCallService 同步路由（如果已在通话中）
             AudioCallService.setSpeaker(this, speakerOn)
         }
 
         btnRight.setOnClickListener { accept() }
+    }
+
+    private fun updateSpeakerUi() {
+        // 你要求：开启时全红色，不开启时保持现在灰色
+        val bg = if (speakerOn) "#D32F2F" else "#424242"
+        btnMid.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor(bg))
+        }
+        tvMid.text = if (speakerOn) "免提：开" else "免提：关"
     }
 
     private fun label(t: String): TextView =
@@ -173,7 +200,6 @@ class IncomingCallActivity : Activity() {
         }
 
         val invite = CallState.incoming ?: run { finish(); return }
-
         val myAudioPort = Random.nextInt(46000, 46999)
 
         HistoryStore.updateCallState(this, invite.callId, "ANSWERED")
@@ -181,7 +207,7 @@ class IncomingCallActivity : Activity() {
         AudioCallService.setSpeaker(this, speakerOn)
         AudioCallService.start(this, invite.peerIp, invite.peerAudioPort, myAudioPort)
 
-        // ✅ ACCEPT 重发 x3
+        // ACCEPT 重发 x3
         sendControlX3(
             ip = invite.peerIp,
             port = invite.peerControlPort,
@@ -197,7 +223,7 @@ class IncomingCallActivity : Activity() {
 
         inCall = true
         tvTop.text = "通话中"
-        tvHint.text = "正在局域网对讲…"
+        tvHint.text = "正在局域网对讲…（建议两机拉开距离/降低音量）"
         tvLeft.text = "挂断"
         tvRight.text = "已接听"
         btnRight.isEnabled = false
@@ -208,7 +234,6 @@ class IncomingCallActivity : Activity() {
         val invite = CallState.incoming ?: run { finish(); return }
         HistoryStore.updateCallState(this, invite.callId, "DECLINED")
 
-        // ✅ DECLINE 重发 x3
         sendControlX3(
             ip = invite.peerIp,
             port = invite.peerControlPort,
@@ -226,11 +251,9 @@ class IncomingCallActivity : Activity() {
 
     private fun hangup() {
         val invite = CallState.incoming
-
         if (invite != null) {
             HistoryStore.updateCallState(this, invite.callId, "ENDED")
 
-            // ✅ HANGUP 重发 x3（关键：保证有卡机一定停掉 AudioCallService）
             sendControlX3(
                 ip = invite.peerIp,
                 port = invite.peerControlPort,
@@ -242,7 +265,6 @@ class IncomingCallActivity : Activity() {
             )
         }
 
-        // 停本机对讲
         try { AudioCallService.stop(this) } catch (_: Throwable) {}
         CallState.incoming = null
         finish()
@@ -252,7 +274,11 @@ class IncomingCallActivity : Activity() {
         if (inCall) hangup() else decline()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 5001) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) accept()
@@ -285,7 +311,8 @@ class IncomingCallActivity : Activity() {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
             am.isSpeakerphoneOn = on
             if (Build.VERSION.SDK_INT >= 31) {
-                val speaker = am.availableCommunicationDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                val speaker = am.availableCommunicationDevices
+                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
                 if (speaker != null) {
                     if (on) am.setCommunicationDevice(speaker) else am.clearCommunicationDevice()
                 }
