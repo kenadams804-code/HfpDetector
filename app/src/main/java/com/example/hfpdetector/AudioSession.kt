@@ -37,6 +37,10 @@ class AudioSession(
             runCatching {
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
                 am.isSpeakerphoneOn = true
+
+                // ✅ 测试用：把通话音量拉到最大（避免“听不到其实是音量为0”）
+                val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+                am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0)
             }
 
             val sampleRate = 16000
@@ -50,8 +54,16 @@ class AudioSession(
             val recBuf = max(minIn, 2048)
             val playBuf = max(minOut, 2048)
 
-            audioRecord = tryCreateAudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate, inConfig, fmt, recBuf * 2)
-                ?: tryCreateAudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, inConfig, fmt, recBuf * 2)
+            // ✅ 先 VOICE_COMMUNICATION，失败则 MIC
+            audioRecord = runCatching {
+                AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate, inConfig, fmt, recBuf * 2)
+            }.getOrNull()
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                audioRecord = runCatching {
+                    AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, inConfig, fmt, recBuf * 2)
+                }.getOrNull()
+            }
 
             val rec = audioRecord
             if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
@@ -59,43 +71,51 @@ class AudioSession(
                 stop(); return
             }
 
-            audioTrack = tryCreateAudioTrack(sampleRate, outConfig, fmt, playBuf * 2)
+            audioTrack = if (Build.VERSION.SDK_INT >= 21) {
+                val attr = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                val af = AudioFormat.Builder()
+                    .setEncoding(fmt)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(outConfig)
+                    .build()
+                AudioTrack(attr, af, playBuf * 2, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
+            } else {
+                @Suppress("DEPRECATION")
+                AudioTrack(AudioManager.STREAM_VOICE_CALL, sampleRate, outConfig, fmt, playBuf * 2, AudioTrack.MODE_STREAM)
+            }
+
             val tr = audioTrack
             if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
                 AppLog.i(context, "AudioSession：AudioTrack 初始化失败")
                 stop(); return
             }
 
-            sock = try {
-                DatagramSocket(null).apply {
-                    reuseAddress = true
-                    bind(InetSocketAddress(myAudioPort))
-                }
-            } catch (t: Throwable) {
-                AppLog.i(context, "AudioSession：绑定 UDP 端口失败 myAudioPort=$myAudioPort err=${t.javaClass.simpleName} ${t.message}")
-                stop(); return
+            // ✅ UDP bind（更稳）
+            sock = DatagramSocket(null).apply {
+                reuseAddress = true
+                bind(InetSocketAddress(myAudioPort))
             }
 
             runCatching { rec.startRecording() }.onFailure {
                 AppLog.i(context, "AudioSession：startRecording 失败：${it.javaClass.simpleName} ${it.message}")
                 stop(); return
             }
-
             runCatching {
                 tr.play()
-                tr.setVolume(1.0f)
+                if (Build.VERSION.SDK_INT >= 21) tr.setVolume(1.0f) else @Suppress("DEPRECATION") tr.setStereoVolume(1f, 1f)
             }.onFailure {
                 AppLog.i(context, "AudioSession：AudioTrack play 失败：${it.javaClass.simpleName} ${it.message}")
                 stop(); return
             }
 
-            // ✅ 日志：每 3 秒打印一次收发字节数，判断是否通
             startStatsLoop()
-
             startSendLoop()
             startRecvLoop()
 
-            AppLog.i(context, "AudioSession：已启动（send/recv 线程已起）")
+            AppLog.i(context, "AudioSession：已启动（send/recv/stats）")
         } catch (t: Throwable) {
             AppLog.i(context, "AudioSession：start 异常：${t.javaClass.simpleName} ${t.message}")
             stop()
@@ -116,33 +136,6 @@ class AudioSession(
                 lastR = r
                 AppLog.i(context, "AudioSession：音频流量 发送=${ds}B/3s 接收=${dr}B/3s (totalS=$s totalR=$r)")
             }
-        }
-    }
-
-    private fun tryCreateAudioRecord(source: Int, sampleRate: Int, inConfig: Int, fmt: Int, bufferBytes: Int): AudioRecord? {
-        return try {
-            AudioRecord(source, sampleRate, inConfig, fmt, bufferBytes)
-        } catch (t: Throwable) {
-            AppLog.i(context, "AudioSession：AudioRecord 构造失败 source=$source err=${t.javaClass.simpleName} ${t.message}")
-            null
-        }
-    }
-
-    private fun tryCreateAudioTrack(sampleRate: Int, outConfig: Int, fmt: Int, bufferBytes: Int): AudioTrack? {
-        return try {
-            val attr = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val af = AudioFormat.Builder()
-                .setEncoding(fmt)
-                .setSampleRate(sampleRate)
-                .setChannelMask(outConfig)
-                .build()
-            AudioTrack(attr, af, bufferBytes, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
-        } catch (t: Throwable) {
-            AppLog.i(context, "AudioSession：AudioTrack 构造失败 err=${t.javaClass.simpleName} ${t.message}")
-            null
         }
     }
 
@@ -189,7 +182,6 @@ class AudioSession(
 
     fun stop() {
         running = false
-
         try { sock?.close() } catch (_: Throwable) {}
         sock = null
 
