@@ -208,26 +208,34 @@ class CoreService : Service() {
     }
 
     private fun pstnEndIfPossible(reason: String) {
-        if (!isHasSimReady()) return
-        if (Build.VERSION.SDK_INT < 28) {
-            AppLog.i(this, "PSTN：API<28，无法 endCall()")
-            return
-        }
-        if (!hasAnswerPerm()) {
-            AppLog.i(this, "PSTN：缺少 ANSWER_PHONE_CALLS，无法挂断（请在有卡机一键授权）")
-            return
-        }
-        try {
-            val tm = getSystemService(TelecomManager::class.java) ?: run {
-                AppLog.i(this, "PSTN：TelecomManager=null")
-                return
-            }
-            val ok = tm.endCall()
-            AppLog.i(this, "PSTN：已调用 endCall() reason=$reason ok=$ok")
-        } catch (t: Throwable) {
-            AppLog.i(this, "PSTN：挂断失败：${t.javaClass.simpleName} ${t.message}")
-        }
+    if (!isHasSimReady()) return
+    if (Build.VERSION.SDK_INT < 28) {
+        AppLog.i(this, "PSTN：API<28，无法 endCall()")
+        return
     }
+    if (!hasAnswerPerm()) {
+        AppLog.i(this, "PSTN：缺少 ANSWER_PHONE_CALLS，无法挂断（请在有卡机一键授权）")
+        return
+    }
+
+    // ✅ 关键：只有电话不空闲时才尝试挂断，避免测试时 ok=false 干扰日志
+    val tel = getSystemService(TelephonyManager::class.java)
+    if (tel?.callState == TelephonyManager.CALL_STATE_IDLE) {
+        AppLog.i(this, "PSTN：当前通话状态=IDLE，跳过 endCall() reason=$reason")
+        return
+    }
+
+    try {
+        val tm = getSystemService(TelecomManager::class.java) ?: run {
+            AppLog.i(this, "PSTN：TelecomManager=null")
+            return
+        }
+        val ok = tm.endCall()
+        AppLog.i(this, "PSTN：已调用 endCall() reason=$reason ok=$ok")
+    } catch (t: Throwable) {
+        AppLog.i(this, "PSTN：挂断失败：${t.javaClass.simpleName} ${t.message}")
+    }
+}
     // =====================
 
     private fun startNetworking() {
