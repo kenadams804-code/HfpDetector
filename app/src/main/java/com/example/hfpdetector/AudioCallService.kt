@@ -6,8 +6,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -45,6 +44,8 @@ class AudioCallService : Service() {
     private lateinit var nm: NotificationManager
     private var session: AudioSession? = null
 
+    private var wifiLock: WifiManager.WifiLock? = null
+
     override fun onCreate() {
         super.onCreate()
         nm = getSystemService(NotificationManager::class.java)
@@ -61,20 +62,18 @@ class AudioCallService : Service() {
                     if (peerAudioPort == 0 || myAudioPort == 0) return START_NOT_STICKY
 
                     startFg()
-
-                    applySpeakerRoute(speakerOn)
+                    acquireWifiLock()
 
                     session?.stop()
                     session = null
-
                     session = AudioSession(this, peerIp, peerAudioPort, myAudioPort).also { it.start() }
+
                     AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort speakerOn=$speakerOn")
                 }
 
                 ACTION_SET_SPEAKER -> {
                     val on = intent.getBooleanExtra("on", true)
                     speakerOn = on
-                    applySpeakerRoute(on)
                     AppLog.i(this, "AudioCallService：设置免提 speakerOn=$on")
                 }
 
@@ -82,6 +81,7 @@ class AudioCallService : Service() {
                     AppLog.i(this, "AudioCallService：停止")
                     session?.stop()
                     session = null
+                    releaseWifiLock()
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
@@ -90,26 +90,28 @@ class AudioCallService : Service() {
         } catch (t: Throwable) {
             AppLog.i(this, "AudioCallService：兜底异常：${t.javaClass.simpleName} ${t.message}")
             try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
+            releaseWifiLock()
             stopSelf()
             START_NOT_STICKY
         }
     }
 
-    private fun applySpeakerRoute(on: Boolean) {
+    private fun acquireWifiLock() {
         try {
-            val am = getSystemService(AudioManager::class.java) ?: return
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
-            am.isSpeakerphoneOn = on
-
-            // Android 12+ 更可靠的路由方式
-            if (Build.VERSION.SDK_INT >= 31) {
-                val speaker = am.availableCommunicationDevices
-                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                if (speaker != null) {
-                    if (on) am.setCommunicationDevice(speaker) else am.clearCommunicationDevice()
-                }
+            if (wifiLock?.isHeld == true) return
+            val wm = applicationContext.getSystemService(WifiManager::class.java) ?: return
+            @Suppress("DEPRECATION")
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "lancall:wifi").apply {
+                setReferenceCounted(false)
+                acquire()
             }
+            AppLog.i(this, "AudioCallService：WifiLock acquired")
         } catch (_: Throwable) {}
+    }
+
+    private fun releaseWifiLock() {
+        try { wifiLock?.release() } catch (_: Throwable) {}
+        wifiLock = null
     }
 
     private fun startFg() {
@@ -138,6 +140,7 @@ class AudioCallService : Service() {
     override fun onDestroy() {
         session?.stop()
         session = null
+        releaseWifiLock()
         super.onDestroy()
     }
 
