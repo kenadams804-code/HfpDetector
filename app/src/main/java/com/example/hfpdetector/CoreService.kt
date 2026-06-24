@@ -185,27 +185,26 @@ class CoreService : Service() {
         }
     }
 
-    private fun pstnAnswerIfPossible() {
-        if (!isHasSimReady()) return
-        if (Build.VERSION.SDK_INT < 26) {
-            AppLog.i(this, "PSTN：API<26，无法 acceptRingingCall()")
-            return
-        }
-        if (!hasAnswerPerm()) {
-            AppLog.i(this, "PSTN：缺少 ANSWER_PHONE_CALLS，无法接听（请在有卡机一键授权）")
-            return
-        }
-        try {
-            val tm = getSystemService(TelecomManager::class.java) ?: run {
-                AppLog.i(this, "PSTN：TelecomManager=null")
-                return
-            }
-            runCatching { tm.silenceRinger() }
-            tm.acceptRingingCall()
-            AppLog.i(this, "PSTN：已调用 acceptRingingCall()")
-        } catch (t: Throwable) {
-            AppLog.i(this, "PSTN：接听失败：${t.javaClass.simpleName} ${t.message}")
-        }
+     private fun pstnAnswerIfPossible() {
+       if (!isHasSimReady()) return
+       if (Build.VERSION.SDK_INT < 26) return
+       if (!hasAnswerPerm()) return
+
+       // ✅ 关键：必须真的在响铃才接听，避免测试INVITE干扰音频路由
+      val tel = getSystemService(TelephonyManager::class.java)
+      if (tel?.callState != TelephonyManager.CALL_STATE_RINGING) {
+          AppLog.i(this, "PSTN：当前不是响铃状态，跳过 acceptRingingCall()")
+          return
+      }
+
+      try {
+          val tm = getSystemService(TelecomManager::class.java) ?: return
+          runCatching { tm.silenceRinger() }
+          tm.acceptRingingCall()
+          AppLog.i(this, "PSTN：已调用 acceptRingingCall()")
+      } catch (t: Throwable) {
+          AppLog.i(this, "PSTN：接听失败：${t.javaClass.simpleName} ${t.message}")
+      }
     }
 
     private fun pstnEndIfPossible(reason: String) {
