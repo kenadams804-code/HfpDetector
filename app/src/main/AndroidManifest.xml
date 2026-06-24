@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-   <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
-   <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-    
     <!-- ✅ 让有卡机可以接听/挂断运营商电话（必须用户授予一次） -->
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
