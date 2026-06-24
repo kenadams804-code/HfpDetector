@@ -186,6 +186,8 @@ class CoreService : Service() {
     }
 
      private fun pstnAnswerIfPossible() {
+       if (Build.VERSION.SDK_INT < 26) { AppLog.i(this,"PSTN：API<26"); return }
+       if (!hasAnswerPerm()) { AppLog.i(this,"PSTN：无 ANSWER_PHONE_CALLS 权限"); return }
        if (!isHasSimReady()) return
        if (Build.VERSION.SDK_INT < 26) return
        if (!hasAnswerPerm()) return
