@@ -39,7 +39,6 @@ class CoreService : Service() {
         private const val ACTION_INCOMING_PSTN = "CoreService.INCOMING_PSTN"
         private const val ACTION_STOP_RING = "CoreService.STOP_RING"
         private const val ACTION_TEST_INVITE = "CoreService.TEST_INVITE"
-
         private const val ACTION_FORWARD_SMS = "CoreService.FORWARD_SMS"
 
         fun start(context: Context) {
@@ -83,6 +82,8 @@ class CoreService : Service() {
     @Volatile private var running = true
 
     private var multicastLock: WifiManager.MulticastLock? = null
+
+    // ✅ 关键：每个 callId 对应的本端音频端口，避免多次 INVITE 覆盖 myAudioPort
     private val audioPortByCallId = ConcurrentHashMap<String, Int>()
 
     @Volatile private var peerIp: InetAddress? = null
@@ -147,7 +148,7 @@ class CoreService : Service() {
                 val num = intent.getStringExtra("number") ?: "未知号码"
                 AppLog.i(this, "收到系统来电回调：$num")
                 handleInviteSend(number = num, isTest = false)
-                audioPortByCallId[cid] = myAudioPort
+                // ✅ 不要在这里写 audioPortByCallId（cid 在 handleInviteSend 里才生成）
             }
 
             ACTION_TEST_INVITE -> {
@@ -171,7 +172,7 @@ class CoreService : Service() {
         return tm?.simState == TelephonyManager.SIM_STATE_READY
     }
 
-    // ====== PSTN 控制（关键：让有卡机执行接听/挂断真实电话）======
+    // ===== PSTN 控制 =====
     private fun hasAnswerPerm(): Boolean {
         return try {
             if (Build.VERSION.SDK_INT >= 23) {
@@ -226,7 +227,7 @@ class CoreService : Service() {
             AppLog.i(this, "PSTN：挂断失败：${t.javaClass.simpleName} ${t.message}")
         }
     }
-    // =====================================================
+    // =====================
 
     private fun startNetworking() {
         socket = DatagramSocket(AppConfig.CONTROL_PORT).apply { broadcast = true }
@@ -311,9 +312,7 @@ class CoreService : Service() {
 
                     val bcast = NetUtils.getBroadcastAddress(this@CoreService)
                         ?: InetAddress.getByName("255.255.255.255")
-                    val obj = JSONObject()
-                        .put("type", "HELLO")
-                        .put("controlPort", AppConfig.CONTROL_PORT)
+                    val obj = JSONObject().put("type", "HELLO").put("controlPort", AppConfig.CONTROL_PORT)
                     val data = obj.toString().toByteArray(Charsets.UTF_8)
                     socket?.send(DatagramPacket(data, data.size, bcast, AppConfig.CONTROL_PORT))
 
@@ -393,7 +392,6 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
-            // ✅ 无卡机点“接听”后：有卡机执行接听真实电话 + 启动对讲
             "ACCEPT" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
@@ -402,36 +400,41 @@ class CoreService : Service() {
                 AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
                 if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
 
-                // ✅ 关键：接听运营商真实电话
+                // ✅ 接听 PSTN（若你仍保留这个功能）
                 pstnAnswerIfPossible()
 
-               val localPort = audioPortByCallId[cid] ?: myAudioPort
-               if (peerAudioPort <= 0 || localPort <= 0) {
-               AppLog.i(this, "有卡端：音频端口异常 localPort=$localPort peerAudioPort=$peerAudioPort")
-               return
+                val localPort = audioPortByCallId[cid] ?: myAudioPort
+                if (peerAudioPort <= 0 || localPort <= 0) {
+                    AppLog.i(this, "有卡端：音频端口异常 localPort=$localPort peerAudioPort=$peerAudioPort")
+                    return
                 }
-               AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, localPort)
-                    AppLog.i(this, "有卡端：已启动 AudioCallService myAudioPort=$myAudioPort peerAudioPort=$peerAudioPort")
+
+                try {
+                    AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, localPort)
+                    AppLog.i(this, "有卡端：已启动 AudioCallService localPort=$localPort peerAudioPort=$peerAudioPort")
                 } catch (t: Throwable) {
                     AppLog.i(this, "有卡端：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
                 }
             }
 
-            // ✅ 无卡机点“拒绝”：有卡机挂断真实电话
             "DECLINE" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
-                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "DECLINED")
+                if (cid.isNotBlank()) {
+                    HistoryStore.updateCallState(this, cid, "DECLINED")
+                    audioPortByCallId.remove(cid)
+                }
                 AppLog.i(this, "有卡端：收到 DECLINE <- ${fromIp.hostAddress} callId=$cid")
-
                 pstnEndIfPossible("DECLINE")
             }
 
-            // ✅ 无卡机点“挂断”：有卡机挂断真实电话 + 停对讲
             "HANGUP" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
                 val cid = obj.optString("callId", "")
-                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ENDED")
+                if (cid.isNotBlank()) {
+                    HistoryStore.updateCallState(this, cid, "ENDED")
+                    audioPortByCallId.remove(cid)
+                }
                 AppLog.i(this, "收到 HANGUP <- ${fromIp.hostAddress} callId=$cid，停止对讲 + 挂断PSTN")
 
                 pstnEndIfPossible("HANGUP")
@@ -481,6 +484,9 @@ class CoreService : Service() {
             callId = cid
             myAudioPort = Random.nextInt(45000, 45999)
 
+            // ✅ 关键：在这里写入映射（cid 在这里才生成）
+            audioPortByCallId[cid] = myAudioPort
+
             HistoryStore.upsertCall(this@CoreService, cid, "OUT", number, peer.hostAddress, isTest, "RINGING")
 
             val obj = JSONObject()
@@ -497,7 +503,7 @@ class CoreService : Service() {
                 sendJson(peer, peerControlPort, obj)
             }
 
-            AppLog.i(this, "有卡端：发送 INVITE x3 -> ${peer.hostAddress} number=$number test=$isTest myAudioPort=$myAudioPort")
+            AppLog.i(this, "有卡端：发送 INVITE x3 -> ${peer.hostAddress} number=$number test=$isTest myAudioPort=$myAudioPort callId=$cid")
         }
     }
 
