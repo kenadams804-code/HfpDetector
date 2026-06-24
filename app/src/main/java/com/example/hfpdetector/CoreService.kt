@@ -83,6 +83,7 @@ class CoreService : Service() {
     @Volatile private var running = true
 
     private var multicastLock: WifiManager.MulticastLock? = null
+    private val audioPortByCallId = ConcurrentHashMap<String, Int>()
 
     @Volatile private var peerIp: InetAddress? = null
     @Volatile private var peerControlPort: Int = AppConfig.CONTROL_PORT
