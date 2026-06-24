@@ -118,7 +118,7 @@ class AudioCallService : Service() {
         val n = NotificationCompat.Builder(this, AppConfig.CH_ONGOING)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setContentTitle("LanCall 通话中")
-            .setContentText("局域网免提对讲进行中")
+            .setContentText("局域网语音通话进行中")
             .setOngoing(true)
             .setSilent(true)
             .build()
