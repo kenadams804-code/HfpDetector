@@ -22,7 +22,14 @@ class AudioCallService : Service() {
 
         @Volatile private var speakerOn: Boolean = true
 
-        fun start(context: Context, peerIp: String, peerAudioPort: Int, myAudioPort: Int, speakerOnInit: Boolean = true) {
+        // ✅ 第5参给默认值，兼容 CoreService 旧的 4参调用
+        fun start(
+            context: Context,
+            peerIp: String,
+            peerAudioPort: Int,
+            myAudioPort: Int,
+            speakerOnInit: Boolean = true
+        ) {
             speakerOn = speakerOnInit
             val i = Intent(context, AudioCallService::class.java).setAction(ACTION_START)
             i.putExtra("peerIp", peerIp)
@@ -72,16 +79,20 @@ class AudioCallService : Service() {
                     applySpeakerRoute(speakerOn)
 
                     session?.stop()
-                    session = AudioSession(this).also { it.start(peerIp, peerAudioPort, myAudioPort) }
+                    session = AudioSession(this, peerIp, peerAudioPort, myAudioPort).also { it.start() }
 
-                    AppLog.i(this, "AudioCallService：AudioSession 已启动")
+                    AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort speakerOn=$speakerOn")
                 }
+
                 ACTION_SET_SPEAKER -> {
                     val on = intent.getBooleanExtra("on", true)
                     speakerOn = on
                     applySpeakerRoute(on)
+                    AppLog.i(this, "AudioCallService：设置免提 speakerOn=$on")
                 }
+
                 ACTION_STOP -> {
+                    AppLog.i(this, "AudioCallService：停止")
                     session?.stop()
                     session = null
                     releaseWifiLock()
@@ -91,7 +102,10 @@ class AudioCallService : Service() {
             }
             START_STICKY
         } catch (t: Throwable) {
-            AppLog.i(this, "AudioCallService 异常：${t.message}")
+            AppLog.i(this, "AudioCallService：异常：${t.javaClass.simpleName} ${t.message}")
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
+            releaseWifiLock()
+            stopSelf()
             START_NOT_STICKY
         }
     }
@@ -100,21 +114,63 @@ class AudioCallService : Service() {
         try {
             val am = getSystemService(AudioManager::class.java) ?: return
             am.mode = AudioManager.MODE_IN_COMMUNICATION
+            am.isMicrophoneMute = false
             am.isSpeakerphoneOn = on
+
             if (Build.VERSION.SDK_INT >= 31) {
-                val speaker = am.availableCommunicationDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                if (speaker != null) if (on) am.setCommunicationDevice(speaker) else am.clearCommunicationDevice()
+                val speaker = am.availableCommunicationDevices
+                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                if (speaker != null) {
+                    if (on) am.setCommunicationDevice(speaker) else am.clearCommunicationDevice()
+                }
             }
         } catch (_: Throwable) {}
     }
 
-    private fun acquireWifiLock() { /* 保持原样 */ }
-    private fun releaseWifiLock() { /* 保持原样 */ }
-    private fun startFg() { /* 保持原样 */ }
-    private fun createChannel() { /* 保持原样 */ }
+    private fun acquireWifiLock() {
+        try {
+            if (wifiLock?.isHeld == true) return
+            val wm = applicationContext.getSystemService(WifiManager::class.java) ?: return
+            @Suppress("DEPRECATION")
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "lancall:wifi").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            AppLog.i(this, "AudioCallService：WifiLock acquired")
+        } catch (_: Throwable) {}
+    }
+
+    private fun releaseWifiLock() {
+        try { wifiLock?.release() } catch (_: Throwable) {}
+        wifiLock = null
+    }
+
+    private fun startFg() {
+        val n = NotificationCompat.Builder(this, AppConfig.CH_ONGOING)
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setContentTitle("LanCall 通话中")
+            .setContentText("局域网语音通话进行中")
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(AppConfig.NID_ONGOING, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            startForeground(AppConfig.NID_ONGOING, n)
+        }
+    }
+
+    private fun createChannel() {
+        if (Build.VERSION.SDK_INT < 26) return
+        nm.createNotificationChannel(
+            NotificationChannel(AppConfig.CH_ONGOING, "LanCall 通话中", NotificationManager.IMPORTANCE_LOW)
+        )
+    }
 
     override fun onDestroy() {
         session?.stop()
+        session = null
         releaseWifiLock()
         super.onDestroy()
     }
