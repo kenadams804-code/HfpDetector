@@ -16,17 +16,13 @@ class AudioSession(private val context: Context) {
     companion object {
         private const val SAMPLE_RATE = 16000
         private const val FRAME_MS = 20
-        private const val FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS / 1000  // 320
+        private const val FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS / 1000
         private const val FRAME_BYTES = FRAME_SAMPLES * 2
 
-        private const val MIC_GAIN = 9.0f      // 进一步加大
+        private const val MIC_GAIN = 9.0f
         private const val RX_GAIN = 4.0f
         private const val PREBUFFER = 8
         private const val JITTER_MAX = 30
-        private const val ENABLE_NOISE_GATE = false
-        private const val NOISE_GATE = 180
-
-        private val silenceFrame = ByteArray(FRAME_BYTES)  // 改为 ByteArray 更安全
     }
 
     private var audioRecord: AudioRecord? = null
@@ -103,12 +99,9 @@ class AudioSession(private val context: Context) {
 
         val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
 
-        audioTrack = AudioTrack(
-            attrs, format, max(minBuf * 4, FRAME_BYTES * 8),
-            AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE
-        ).apply { play() }
+        audioTrack = AudioTrack(attrs, format, max(minBuf * 4, FRAME_BYTES * 8),
+            AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE).apply { play() }
 
-        // 强制最大音量
         try {
             val am = context.getSystemService(AudioManager::class.java)
             val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
@@ -125,22 +118,15 @@ class AudioSession(private val context: Context) {
                 try {
                     val read = audioRecord?.read(buffer, 0, FRAME_SAMPLES) ?: 0
                     if (read > 0) {
-                        // MIC 增益
                         for (i in 0 until read) {
                             val amp = (buffer[i] * MIC_GAIN).toInt()
                             buffer[i] = amp.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                         }
-
-                        val peak = pcm16lePeak(buffer)
-                        if (ENABLE_NOISE_GATE && peak < NOISE_GATE) {
-                            txSocket?.send(DatagramPacket(silenceFrame, 0, FRAME_BYTES, peerIp, peerPort))
-                        } else {
-                            for (i in 0 until read) {
-                                byteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
-                                byteBuffer[i * 2 + 1] = ((buffer[i].toInt() shr 8) and 0xFF).toByte()
-                            }
-                            txSocket?.send(DatagramPacket(byteBuffer, 0, read * 2, peerIp, peerPort))
+                        for (i in 0 until read) {
+                            byteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
+                            byteBuffer[i * 2 + 1] = ((buffer[i].toInt() shr 8) and 0xFF).toByte()
                         }
+                        txSocket?.send(DatagramPacket(byteBuffer, read * 2, peerIp, peerPort))
                     }
                 } catch (_: Exception) {}
             }
@@ -173,12 +159,10 @@ class AudioSession(private val context: Context) {
                 val toPlay = synchronized(jitterBuffer) {
                     if (jitterBuffer.size >= PREBUFFER) jitterBuffer.removeFirst() else null
                 }
-
                 if (toPlay != null) {
                     for (i in 0 until FRAME_SAMPLES) {
                         val s = ((toPlay[i * 2].toInt() and 0xFF) or ((toPlay[i * 2 + 1].toInt() and 0xFF) shl 8)).toShort()
-                        val amplified = (s * RX_GAIN).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                        shortBuf[i] = amplified
+                        shortBuf[i] = (s * RX_GAIN).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                     }
                     lastRxPeak = pcm16lePeak(shortBuf)
                     audioTrack?.write(shortBuf, 0, FRAME_SAMPLES)
@@ -194,7 +178,7 @@ class AudioSession(private val context: Context) {
             while (running) {
                 Thread.sleep(1000)
                 val jitterSize = synchronized(jitterBuffer) { jitterBuffer.size }
-                AppLog.i(this, "Audio stats: jitterQ=$jitterSize rxPeak=$lastRxPeak gate=$ENABLE_NOISE_GATE")
+                AppLog.i(this, "Audio stats: jitterQ=$jitterSize rxPeak=$lastRxPeak")
             }
         }
     }
