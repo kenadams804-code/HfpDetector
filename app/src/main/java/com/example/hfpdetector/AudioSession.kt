@@ -181,7 +181,7 @@ class AudioSession(
 
             val af = AudioFormat.Builder()
                 .setEncoding(fmt)
-                                .setSampleRate(SAMPLE_RATE)
+                .setSampleRate(SAMPLE_RATE)
                 .setChannelMask(outConfig)
                 .build()
 
