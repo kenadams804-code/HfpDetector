@@ -12,6 +12,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.PortUnreachableException
 import java.net.SocketTimeoutException
 import java.util.ArrayDeque
 import kotlin.concurrent.thread
@@ -40,46 +41,33 @@ class AudioSession(
     private val FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS / 1000 // 320
     private val FRAME_BYTES = FRAME_SAMPLES * 2               // 640
 
-    // ==== jitter buffer（更保守：减少断续，代价是延迟略增） ====
-    private val JITTER_MAX = 25        // 最大缓存帧数 ≈ 500ms
-    private val PREBUFFER = 5          // 预缓冲帧数 ≈ 100ms
-    private val CATCHUP_TARGET = 12    // 队列超过就丢帧追赶，防止延迟无限长
-
+    // ==== jitter buffer ====
     private val qLock = Any()
     private val jitterQ = ArrayDeque<ByteArray>()
-    @Volatile private var jitterSize: Int = 0
+
+    // 建议先保守一点，减少断续
+    private val JITTER_MAX = 20
+    private val PREBUFFER = 5
+    private val CATCHUP_TARGET = 12
 
     // ==== stats ====
     @Volatile private var sentBytes: Long = 0
     @Volatile private var recvBytes: Long = 0
     @Volatile private var lastMicPeak: Int = 0
+    @Volatile private var jitterSize: Int = 0
     @Volatile private var underflow: Long = 0
     @Volatile private var dropped: Long = 0
 
-    // ==== effects ====
+    // effects
     private val ENABLE_AEC = true
     private val ENABLE_NS = false
     private val ENABLE_AGC = false
 
-    // ==== Noise gate（用 HPF 后能量判断） ====
-    private val NOISE_GATE = 120          // 建议 80~220 调
-    private val HANGOVER_FRAMES = 12      // 240ms
+    // noise gate（先别太激进）
+    private val NOISE_GATE = 180
+    private val HANGOVER_FRAMES = 10
     private var hangover = 0
     private val silenceFrame = ByteArray(FRAME_BYTES)
-
-    // ==== HPF（简单一阶高通，压风噪低频） ====
-    // y[n] = x[n] - x[n-1] + R * y[n-1]
-    // R 越接近 1，截止越低。0.95~0.97 适合压风噪但保留人声厚度。
-    private val HP_R_Q15 = (0.955f * 32768f).toInt() // Q15
-    private var hpX1 = 0
-    private var hpY1 = 0
-
-    private fun highPass(x: Int): Int {
-        val y = x - hpX1 + ((HP_R_Q15 * hpY1) shr 15)
-        hpX1 = x
-        hpY1 = y
-        return y
-    }
 
     fun start() {
         if (running) return
@@ -89,7 +77,6 @@ class AudioSession(
             AppLog.i(context, "AudioSession start peer=$peerIp:$peerAudioPort myPort=$myAudioPort")
 
             val am = context.getSystemService(AudioManager::class.java)
-
             runCatching {
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
                 am.isSpeakerphoneOn = true
@@ -102,11 +89,9 @@ class AudioSession(
 
             val minIn = AudioRecord.getMinBufferSize(SAMPLE_RATE, inConfig, fmt)
             val minOut = AudioTrack.getMinBufferSize(SAMPLE_RATE, outConfig, fmt)
-
             val recBuf = max(minIn, 4096)
             val playBuf = max(minOut, 4096)
 
-            // AudioRecord：VOICE_COMMUNICATION 优先，失败降级 MIC
             audioRecord = runCatching {
                 AudioRecord(
                     MediaRecorder.AudioSource.VOICE_COMMUNICATION,
@@ -133,32 +118,23 @@ class AudioSession(
 
             // AEC/NS/AGC
             val sid = rec.audioSessionId
-
             runCatching {
                 if (ENABLE_AEC && AcousticEchoCanceler.isAvailable()) {
                     aec = AcousticEchoCanceler.create(sid)?.apply { enabled = true }
                     AppLog.i(context, "AudioSession AEC enabled=${aec?.enabled}")
-                } else {
-                    AppLog.i(context, "AudioSession AEC disabled/unavailable")
-                }
+                } else AppLog.i(context, "AudioSession AEC disabled/unavailable")
             }
-
             runCatching {
                 if (ENABLE_NS && NoiseSuppressor.isAvailable()) {
                     ns = NoiseSuppressor.create(sid)?.apply { enabled = true }
                     AppLog.i(context, "AudioSession NS enabled=${ns?.enabled}")
-                } else {
-                    AppLog.i(context, "AudioSession NS disabled/unavailable")
-                }
+                } else AppLog.i(context, "AudioSession NS disabled/unavailable")
             }
-
             runCatching {
                 if (ENABLE_AGC && AutomaticGainControl.isAvailable()) {
                     agc = AutomaticGainControl.create(sid)?.apply { enabled = true }
                     AppLog.i(context, "AudioSession AGC enabled=${agc?.enabled}")
-                } else {
-                    AppLog.i(context, "AudioSession AGC disabled/unavailable")
-                }
+                } else AppLog.i(context, "AudioSession AGC disabled/unavailable")
             }
 
             val attr = AudioAttributes.Builder()
@@ -185,19 +161,13 @@ class AudioSession(
                 stop(); return
             }
 
-            // UDP socket
-            val peerAddr = InetAddress.getByName(peerIp)
+            // UDP socket（关键：不 connect，发送时显式指定 peerAddr，避免 null address NPE）
             sock = DatagramSocket(null).apply {
                 reuseAddress = true
                 soTimeout = 300
                 bind(InetSocketAddress(myAudioPort))
-
-                // 尽量加大 socket buffer，减少 burst 丢包导致的断续
                 runCatching { receiveBufferSize = 1 shl 20 }
                 runCatching { sendBufferSize = 1 shl 20 }
-
-                // 连接到对端（收包只收这个对端，发包也省去每次指定 addr）
-                runCatching { connect(peerAddr, peerAudioPort) }
             }
 
             rec.startRecording()
@@ -207,6 +177,8 @@ class AudioSession(
             startTxThread()
             startPlayoutThread()
             startStatsThread()
+
+            AppLog.i(context, "AudioSession：已启动（rx/tx/play/stats）")
 
         } catch (t: Throwable) {
             AppLog.i(context, "AudioSession start exception: ${t.javaClass.simpleName} ${t.message}")
@@ -225,6 +197,12 @@ class AudioSession(
             while (running) {
                 try {
                     s.receive(pkt)
+                    val from = pkt.address?.hostAddress ?: ""
+                    if (from.isNotBlank() && from != peerIp) {
+                        // 只收对端的（避免局域网杂包）
+                        continue
+                    }
+
                     val len = pkt.length
                     if (len <= 0) continue
 
@@ -245,8 +223,11 @@ class AudioSession(
                         jitterQ.addLast(frame)
                         jitterSize = jitterQ.size
                     }
+
                 } catch (_: SocketTimeoutException) {
                     // allow exit
+                } catch (_: PortUnreachableException) {
+                    // ✅ 忽略：对端端口临时不可达/系统回报 ICMP，不要因此中断
                 } catch (t: Throwable) {
                     if (running) AppLog.i(context, "AudioRx exception: ${t.javaClass.simpleName} ${t.message}")
                 }
@@ -256,6 +237,8 @@ class AudioSession(
 
     private fun startTxThread() {
         val s = sock ?: return
+        val peerAddr = InetAddress.getByName(peerIp)
+
         thread(name = "AudioTx", isDaemon = true) {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
 
@@ -263,12 +246,20 @@ class AudioSession(
             val shortBuf = ShortArray(FRAME_SAMPLES)
             val outBytes = ByteArray(FRAME_BYTES)
 
+            // 复用 packet，避免频繁分配
+            val pktVoice = DatagramPacket(outBytes, outBytes.size, peerAddr, peerAudioPort)
+            val pktSilence = DatagramPacket(silenceFrame, silenceFrame.size, peerAddr, peerAudioPort)
+
             while (running) {
-                // ✅ 读满一整帧（20ms），减少“读不满导致的断续”
+                // 读满一帧
                 var got = 0
                 while (running && got < FRAME_SAMPLES) {
                     val n = try {
-                        rec.read(shortBuf, got, FRAME_SAMPLES - got)
+                        if (Build.VERSION.SDK_INT >= 23) {
+                            rec.read(shortBuf, got, FRAME_SAMPLES - got, AudioRecord.READ_BLOCKING)
+                        } else {
+                            rec.read(shortBuf, got, FRAME_SAMPLES - got)
+                        }
                     } catch (t: Throwable) {
                         if (running) AppLog.i(context, "AudioTx read exception: ${t.javaClass.simpleName} ${t.message}")
                         -1
@@ -276,65 +267,52 @@ class AudioSession(
                     if (n <= 0) break
                     got += n
                 }
+
                 if (got <= 0) {
                     SystemClock.sleep(5)
                     continue
                 }
-                // 不足补 0
+
                 for (i in got until FRAME_SAMPLES) shortBuf[i] = 0
 
-                // mic peak（原始）
-                var peakRaw = 0
-                for (i in 0 until FRAME_SAMPLES) {
-                    val a = abs(shortBuf[i].toInt())
-                    if (a > peakRaw) peakRaw = a
-                }
-                lastMicPeak = peakRaw
-
-                // HPF + 计算能量（平均绝对值）
+                // micPeak + meanAbs
+                var peak = 0
                 var sumAbs = 0
-                // 同时把滤波结果写回 shortBuf（发送也用滤波后的，更压风噪）
                 for (i in 0 until FRAME_SAMPLES) {
-                    val x = shortBuf[i].toInt()
-                    var y = highPass(x)
-                    y = y.coerceIn(-32768, 32767)
-                    shortBuf[i] = y.toShort()
-                    sumAbs += abs(y)
+                    val v = shortBuf[i].toInt()
+                    val a = abs(v)
+                    if (a > peak) peak = a
+                    sumAbs += a
                 }
+                lastMicPeak = peak
                 val meanAbs = sumAbs / FRAME_SAMPLES
 
-                // Noise gate + hangover
                 val sendSilence = if (meanAbs >= NOISE_GATE) {
                     hangover = HANGOVER_FRAMES
                     false
                 } else {
-                    if (hangover > 0) {
-                        hangover--
-                        false
-                    } else true
-                }
-
-                if (sendSilence) {
-                    try {
-                        s.send(DatagramPacket(silenceFrame, silenceFrame.size))
-                        sentBytes += silenceFrame.size.toLong()
-                    } catch (t: Throwable) {
-                        if (running) AppLog.i(context, "AudioTx send exception: ${t.javaClass.simpleName} ${t.message}")
-                    }
-                    continue
-                }
-
-                // ShortArray -> LittleEndian PCM16 bytes
-                var bi = 0
-                for (i in 0 until FRAME_SAMPLES) {
-                    val v = shortBuf[i].toInt()
-                    outBytes[bi++] = (v and 0xFF).toByte()
-                    outBytes[bi++] = ((v shr 8) and 0xFF).toByte()
+                    if (hangover > 0) { hangover--; false } else true
                 }
 
                 try {
-                    s.send(DatagramPacket(outBytes, outBytes.size))
+                    if (sendSilence) {
+                        s.send(pktSilence)
+                        sentBytes += silenceFrame.size.toLong()
+                        continue
+                    }
+
+                    // Short -> LE bytes
+                    var bi = 0
+                    for (i in 0 until FRAME_SAMPLES) {
+                        val v = shortBuf[i].toInt()
+                        outBytes[bi++] = (v and 0xFF).toByte()
+                        outBytes[bi++] = ((v shr 8) and 0xFF).toByte()
+                    }
+
+                    // pktVoice 的 data 就是 outBytes，无需 setData
+                    s.send(pktVoice)
                     sentBytes += outBytes.size.toLong()
+
                 } catch (t: Throwable) {
                     if (running) AppLog.i(context, "AudioTx send exception: ${t.javaClass.simpleName} ${t.message}")
                 }
