@@ -14,33 +14,37 @@ import androidx.core.app.NotificationCompat
 class AudioCallService : Service() {
 
     companion object {
-        private const val ACTION_START = "AudioCallService.START"
-        private const val ACTION_STOP = "AudioCallService.STOP"
-        private const val ACTION_SET_SPEAKER = "AudioCallService.SET_SPEAKER"
+    private const val ACTION_START = "AudioCallService.START"
+    private const val ACTION_STOP = "AudioCallService.STOP"
+    private const val ACTION_SET_SPEAKER = "AudioCallService.SET_SPEAKER"
 
-        @Volatile private var speakerOn: Boolean = true
+    @Volatile private var speakerOn: Boolean = true
 
-        fun start(context: Context, peerIp: String, peerAudioPort: Int, myAudioPort: Int) {
-            val i = Intent(context, AudioCallService::class.java).setAction(ACTION_START)
-            i.putExtra("peerIp", peerIp)
-            i.putExtra("peerAudioPort", peerAudioPort)
-            i.putExtra("myAudioPort", myAudioPort)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
-        }
+    fun start(context: Context, peerIp: String, peerAudioPort: Int, myAudioPort: Int, speakerOnInit: Boolean) {
+        speakerOn = speakerOnInit
+        val i = Intent(context, AudioCallService::class.java).setAction(ACTION_START)
+        i.putExtra("peerIp", peerIp)
+        i.putExtra("peerAudioPort", peerAudioPort)
+        i.putExtra("myAudioPort", myAudioPort)
+        i.putExtra("speakerOn", speakerOnInit)
 
-        fun stop(context: Context) {
-            val i = Intent(context, AudioCallService::class.java).setAction(ACTION_STOP)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
-        }
-
-        fun setSpeaker(context: Context, on: Boolean) {
-            speakerOn = on
-            val i = Intent(context, AudioCallService::class.java).setAction(ACTION_SET_SPEAKER)
-            i.putExtra("on", on)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
-        }
+        if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(i) else context.startService(i)
     }
 
+    fun stop(context: Context) {
+        // ✅ 不要 startForegroundService
+        val i = Intent(context, AudioCallService::class.java).setAction(ACTION_STOP)
+        context.startService(i)
+    }
+
+    fun setSpeaker(context: Context, on: Boolean) {
+        speakerOn = on
+        // ✅ 不要 startForegroundService
+        val i = Intent(context, AudioCallService::class.java).setAction(ACTION_SET_SPEAKER)
+        i.putExtra("on", on)
+        context.startService(i)
+    }
+}
     private lateinit var nm: NotificationManager
     private var session: AudioSession? = null
 
