@@ -155,23 +155,16 @@ class IncomingCallActivity : Activity() {
         updateSpeakerUi()
 
         btnLeft.setOnClickListener { if (inCall) hangup() else decline() }
+btnMid.setOnClickListener {
+    ...
+    speakerOn = !speakerOn
+    updateSpeakerUi()
+    applySpeakerRoute(speakerOn)
 
-        btnMid.setOnClickListener {
-            val now = System.currentTimeMillis()
-            if (now - lastSpeakerToggleTs < 500) return@setOnClickListener
-            lastSpeakerToggleTs = now
-
-            speakerOn = !speakerOn
-            updateSpeakerUi()
-            applySpeakerRoute(speakerOn)
-
-            // 通知 AudioCallService 同步路由（如果已在通话中）
-            AudioCallService.setSpeaker(this, speakerOn)
-        }
-
-        btnRight.setOnClickListener { accept() }
+    if (inCall) {
+        AudioCallService.setSpeaker(this, speakerOn)
     }
-
+}
     private fun updateSpeakerUi() {
         // 你要求：开启时全红色，不开启时保持现在灰色
         val bg = if (speakerOn) "#D32F2F" else "#424242"
