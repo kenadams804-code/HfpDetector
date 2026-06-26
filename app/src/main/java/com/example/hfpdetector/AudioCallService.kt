@@ -59,27 +59,31 @@ class AudioCallService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return try {
             when (intent?.action) {
-                ACTION_START -> {
-                    val peerIp = intent.getStringExtra("peerIp") ?: return START_NOT_STICKY
-                    val peerAudioPort = intent.getIntExtra("peerAudioPort", 0)
-                    val myAudioPort = intent.getIntExtra("myAudioPort", 0)
-                    if (peerAudioPort == 0 || myAudioPort == 0) return START_NOT_STICKY
+    ACTION_START -> {
+        val peerIp = intent.getStringExtra("peerIp") ?: return START_NOT_STICKY
+        val peerAudioPort = intent.getIntExtra("peerAudioPort", 0)
+        val myAudioPort = intent.getIntExtra("myAudioPort", 0)
+        speakerOn = intent.getBooleanExtra("speakerOn", true)
 
-                    startFg()
-                    acquireWifiLock()
+        if (peerAudioPort == 0 || myAudioPort == 0) return START_NOT_STICKY
 
-                    session?.stop()
-                    session = null
-                    session = AudioSession(this, peerIp, peerAudioPort, myAudioPort).also { it.start() }
+        startFg()
+        acquireWifiLock()
 
-                    AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort speakerOn=$speakerOn")
-                }
+        applySpeakerRoute(speakerOn)
 
-                ACTION_SET_SPEAKER -> {
-                    val on = intent.getBooleanExtra("on", true)
-                    speakerOn = on
-                    AppLog.i(this, "AudioCallService：设置免提 speakerOn=$on")
-                }
+        session?.stop()
+        session = AudioSession(this, peerIp, peerAudioPort, myAudioPort).also { it.start() }
+
+        AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort speakerOn=$speakerOn")
+    }
+
+    ACTION_SET_SPEAKER -> {
+        val on = intent.getBooleanExtra("on", true)
+        speakerOn = on
+        applySpeakerRoute(on)
+        AppLog.i(this, "AudioCallService：设置免提 speakerOn=$on")
+    }
 
                 ACTION_STOP -> {
                     AppLog.i(this, "AudioCallService：停止")
