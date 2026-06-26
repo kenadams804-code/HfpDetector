@@ -17,6 +17,20 @@ class AudioCallService : Service() {
     private const val ACTION_START = "AudioCallService.START"
     private const val ACTION_STOP = "AudioCallService.STOP"
     private const val ACTION_SET_SPEAKER = "AudioCallService.SET_SPEAKER"
+    private fun applySpeakerRoute(on: Boolean) {
+    try {
+        val am = getSystemService(AudioManager::class.java) ?: return
+        am.mode = AudioManager.MODE_IN_COMMUNICATION
+        am.isSpeakerphoneOn = on
+        if (Build.VERSION.SDK_INT >= 31) {
+            val speaker = am.availableCommunicationDevices
+                .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            if (speaker != null) {
+                if (on) am.setCommunicationDevice(speaker) else am.clearCommunicationDevice()
+            }
+        }
+    } catch (_: Throwable) {}
+}
 
     @Volatile private var speakerOn: Boolean = true
 
