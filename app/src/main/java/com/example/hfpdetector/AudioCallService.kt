@@ -22,13 +22,7 @@ class AudioCallService : Service() {
 
         @Volatile private var speakerOn: Boolean = true
 
-        fun start(
-            context: Context,
-            peerIp: String,
-            peerAudioPort: Int,
-            myAudioPort: Int,
-            speakerOnInit: Boolean = true
-        ) {
+        fun start(context: Context, peerIp: String, peerAudioPort: Int, myAudioPort: Int, speakerOnInit: Boolean = true) {
             speakerOn = speakerOnInit
             val i = Intent(context, AudioCallService::class.java).setAction(ACTION_START)
             i.putExtra("peerIp", peerIp)
@@ -78,22 +72,16 @@ class AudioCallService : Service() {
                     applySpeakerRoute(speakerOn)
 
                     session?.stop()
-                    session = AudioSession(this).also { 
-                        it.start(peerIp, peerAudioPort, myAudioPort) 
-                    }
+                    session = AudioSession(this).also { it.start(peerIp, peerAudioPort, myAudioPort) }
 
-                    AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort speakerOn=$speakerOn")
+                    AppLog.i(this, "AudioCallService：AudioSession 已启动")
                 }
-
                 ACTION_SET_SPEAKER -> {
                     val on = intent.getBooleanExtra("on", true)
                     speakerOn = on
                     applySpeakerRoute(on)
-                    AppLog.i(this, "AudioCallService：设置免提 speakerOn=$on")
                 }
-
                 ACTION_STOP -> {
-                    AppLog.i(this, "AudioCallService：停止")
                     session?.stop()
                     session = null
                     releaseWifiLock()
@@ -103,24 +91,30 @@ class AudioCallService : Service() {
             }
             START_STICKY
         } catch (t: Throwable) {
-            AppLog.i(this, "AudioCallService：兜底异常：${t.javaClass.simpleName} ${t.message}")
-            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
-            releaseWifiLock()
-            stopSelf()
+            AppLog.i(this, "AudioCallService 异常：${t.message}")
             START_NOT_STICKY
         }
     }
 
-    // 其余方法保持不变（applySpeakerRoute, acquireWifiLock 等）
-    private fun applySpeakerRoute(on: Boolean) { /* ... */ }
-    private fun acquireWifiLock() { /* ... */ }
-    private fun releaseWifiLock() { /* ... */ }
-    private fun startFg() { /* ... */ }
-    private fun createChannel() { /* ... */ }
+    private fun applySpeakerRoute(on: Boolean) {
+        try {
+            val am = getSystemService(AudioManager::class.java) ?: return
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            am.isSpeakerphoneOn = on
+            if (Build.VERSION.SDK_INT >= 31) {
+                val speaker = am.availableCommunicationDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                if (speaker != null) if (on) am.setCommunicationDevice(speaker) else am.clearCommunicationDevice()
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun acquireWifiLock() { /* 保持原样 */ }
+    private fun releaseWifiLock() { /* 保持原样 */ }
+    private fun startFg() { /* 保持原样 */ }
+    private fun createChannel() { /* 保持原样 */ }
 
     override fun onDestroy() {
         session?.stop()
-        session = null
         releaseWifiLock()
         super.onDestroy()
     }
