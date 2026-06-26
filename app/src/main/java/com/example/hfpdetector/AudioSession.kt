@@ -181,4 +181,24 @@ class AudioSession(
 
             val af = AudioFormat.Builder()
                 .setEncoding(fmt)
-                .setSampleRate(SAMPLE_RATE
+                                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(outConfig)
+                .build()
+
+            audioTrack = AudioTrack(
+                attr, af,
+                playBuf * 2,
+                AudioTrack.MODE_STREAM,
+                AudioManager.AUDIO_SESSION_ID_GENERATE
+            )
+
+            val tr = audioTrack
+            if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
+                AppLog.i(context, "AudioSession：AudioTrack 初始化失败")
+                stop(); return
+            }
+
+            // 尽量把播放绑到扬声器
+            runCatching {
+                val outs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                val spk = outs.firstOrNull { it.type ==
