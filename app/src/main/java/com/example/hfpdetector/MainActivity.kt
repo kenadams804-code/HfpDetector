@@ -2,14 +2,15 @@
 package com.example.hfpdetector
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.View
-import android.widget.*
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.Spinner
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -22,7 +23,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        hasSim = Prefs.isHasSimReady(this) // 你可以自行实现或用 TelephonyManager 判断
+
+        // ✅ 直接用 SimUtils.kt 里提供的 Context 扩展函数
+        hasSim = applicationContext.isHasSimReady()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -54,7 +57,6 @@ class MainActivity : AppCompatActivity() {
         btnPair.setOnClickListener { startActivity(Intent(this, PairingActivity::class.java)) }
         btnTest.setOnClickListener { CoreService.sendTestInvite(this) }
 
-        // 权限请求
         requestPermissionsIfNeeded()
     }
 
@@ -63,7 +65,9 @@ class MainActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             perms.add(Manifest.permission.RECORD_AUDIO)
         }
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
         if (perms.isNotEmpty()) {
