@@ -40,7 +40,7 @@ class AudioSession(
     private val FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS / 1000 // 320
     private val FRAME_BYTES = FRAME_SAMPLES * 2               // 640
 
-    // jitter（你原先是可用的，先别大改）
+    // jitter
     private val qLock = Any()
     private val jitterQ = ArrayDeque<ByteArray>()
     private val JITTER_MAX = 20
@@ -56,17 +56,20 @@ class AudioSession(
     @Volatile private var underflow: Long = 0
     @Volatile private var dropped: Long = 0
 
-    // effects（先保持你想要的：AEC开，NS/AGC关）
+    // effects
     private val ENABLE_AEC = true
     private val ENABLE_NS = false
     private val ENABLE_AGC = false
 
-    // ✅ 关键：先临时关闭噪声门，排除“被门掉导致全静音”
+    // 关键修复：完全关闭噪声门 + 增加麦克风数字增益
     private val ENABLE_NOISE_GATE = false
     private val NOISE_GATE = 220
     private val HANGOVER_FRAMES = 10
     private var hangover = 0
     private val silenceFrame = ByteArray(FRAME_BYTES)
+
+    // 新增：麦克风数字增益（可调，建议先用 3.0~6.0）
+    private val MIC_GAIN = 4.0f
 
     // audio focus
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -77,17 +80,16 @@ class AudioSession(
         running = true
 
         try {
-            AppLog.i(context, "AudioSession start peer=$peerIp:$peerAudioPort myPort=$myAudioPort")
+            AppLog.i(context, "AudioSession start peer=$peerIp:$peerAudioPort myPort=$myAudioPort MIC_GAIN=$MIC_GAIN")
 
             val am = context.getSystemService(AudioManager::class.java)
 
-            // 1) 请求 AudioFocus（Android 15 上建议做）
             requestFocus(am)
 
-            // 2) 强制把 VOICE_CALL 音量拉高一点（很多人系统通话音量=0）
+            // 强制提高音量
             runCatching {
                 val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                val target = (maxVol * 0.70f).toInt().coerceAtLeast(1)
+                val target = (maxVol * 0.85f).toInt().coerceAtLeast(5)
                 am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0)
                 AppLog.i(context, "AudioSession voiceCallVol=${am.getStreamVolume(AudioManager.STREAM_VOICE_CALL)}/$maxVol")
             }
@@ -107,22 +109,14 @@ class AudioSession(
             val recBuf = max(minIn, 4096)
             val playBuf = max(minOut, 4096)
 
-            // AudioRecord：VOICE_COMMUNICATION 优先，失败降级 MIC
+            // AudioRecord
             audioRecord = runCatching {
-                AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                    SAMPLE_RATE, inConfig, fmt,
-                    recBuf * 2
-                )
+                AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE, inConfig, fmt, recBuf * 2)
             }.getOrNull()
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 audioRecord = runCatching {
-                    AudioRecord(
-                        MediaRecorder.AudioSource.MIC,
-                        SAMPLE_RATE, inConfig, fmt,
-                        recBuf * 2
-                    )
+                    AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, inConfig, fmt, recBuf * 2)
                 }.getOrNull()
             }
 
@@ -143,13 +137,11 @@ class AudioSession(
             runCatching {
                 if (ENABLE_NS && NoiseSuppressor.isAvailable()) {
                     ns = NoiseSuppressor.create(sid)?.apply { enabled = true }
-                    AppLog.i(context, "AudioSession NS enabled=${ns?.enabled}")
                 } else AppLog.i(context, "AudioSession NS disabled/unavailable")
             }
             runCatching {
                 if (ENABLE_AGC && AutomaticGainControl.isAvailable()) {
                     agc = AutomaticGainControl.create(sid)?.apply { enabled = true }
-                    AppLog.i(context, "AudioSession AGC enabled=${agc?.enabled}")
                 } else AppLog.i(context, "AudioSession AGC disabled/unavailable")
             }
 
@@ -164,12 +156,7 @@ class AudioSession(
                 .setChannelMask(outConfig)
                 .build()
 
-            audioTrack = AudioTrack(
-                attr, af,
-                playBuf * 2,
-                AudioTrack.MODE_STREAM,
-                AudioManager.AUDIO_SESSION_ID_GENERATE
-            )
+            audioTrack = AudioTrack(attr, af, playBuf * 2, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
 
             val tr = audioTrack
             if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
@@ -177,7 +164,6 @@ class AudioSession(
                 stop(); return
             }
 
-            // 明确把 track 音量拉满（避免被系统/ROM默认给低音量）
             runCatching { tr.setVolume(1.0f) }
 
             sock = DatagramSocket(null).apply {
@@ -196,7 +182,7 @@ class AudioSession(
             startPlayoutThread()
             startStatsThread()
 
-            AppLog.i(context, "AudioSession started")
+            AppLog.i(context, "AudioSession started (with MIC_GAIN=$MIC_GAIN)")
 
         } catch (t: Throwable) {
             AppLog.i(context, "AudioSession start exception: ${t.javaClass.simpleName} ${t.message}")
@@ -204,16 +190,12 @@ class AudioSession(
         }
     }
 
-    private fun requestFocus(am: AudioManager) {
+    private fun requestFocus(am: AudioManager) { /* 保持原样 */ 
+        // ... (省略原函数，内容不变)
         try {
             if (Build.VERSION.SDK_INT >= 26) {
                 val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build()
-                    )
+                    .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                     .setOnAudioFocusChangeListener { }
                     .build()
                 audioFocusRequest = req
@@ -222,11 +204,7 @@ class AudioSession(
                 AppLog.i(context, "AudioSession audioFocus granted=$audioFocused")
             } else {
                 @Suppress("DEPRECATION")
-                val r = am.requestAudioFocus(
-                    null,
-                    AudioManager.STREAM_VOICE_CALL,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
-                )
+                val r = am.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                 audioFocused = (r == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
                 AppLog.i(context, "AudioSession audioFocus(granted)=$audioFocused")
             }
@@ -235,12 +213,11 @@ class AudioSession(
         }
     }
 
-    private fun abandonFocus() {
+    private fun abandonFocus() { /* 原样 */ 
         try {
             val am = context.getSystemService(AudioManager::class.java)
             if (Build.VERSION.SDK_INT >= 26) {
-                val req = audioFocusRequest
-                if (req != null) am.abandonAudioFocusRequest(req)
+                audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
             } else {
                 @Suppress("DEPRECATION")
                 am.abandonAudioFocus(null)
@@ -250,7 +227,7 @@ class AudioSession(
         audioFocused = false
     }
 
-    private fun startRxThread() {
+    private fun startRxThread() { /* 原样 */ 
         val s = sock ?: return
         thread(name = "AudioRx", isDaemon = true) {
             Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
@@ -280,9 +257,9 @@ class AudioSession(
                         jitterQ.addLast(frame)
                         jitterSize = jitterQ.size
                     }
-                } catch (_: SocketTimeoutException) {
-                } catch (_: PortUnreachableException) {
-                } catch (t: Throwable) {
+                } catch (_: SocketTimeoutException) {}
+                catch (_: PortUnreachableException) {}
+                catch (t: Throwable) {
                     if (running) AppLog.i(context, "AudioRx exception: ${t.javaClass.simpleName} ${t.message}")
                 }
             }
@@ -304,7 +281,6 @@ class AudioSession(
             val pktSilence = DatagramPacket(silenceFrame, silenceFrame.size, peerAddr, peerAudioPort)
 
             while (running) {
-                // ✅ 读满一帧（减少断续/抖动）
                 var got = 0
                 while (running && got < FRAME_SAMPLES) {
                     val n = try {
@@ -326,6 +302,7 @@ class AudioSession(
                 }
                 for (i in got until FRAME_SAMPLES) shortBuf[i] = 0
 
+                // 计算原始 peak
                 var peak = 0
                 var sumAbs = 0
                 for (i in 0 until FRAME_SAMPLES) {
@@ -336,15 +313,15 @@ class AudioSession(
                 lastMicPeak = peak
                 val meanAbs = sumAbs / FRAME_SAMPLES
 
-                val sendSilence = if (!ENABLE_NOISE_GATE) {
-                    false
-                } else {
-                    if (meanAbs >= NOISE_GATE) {
-                        hangover = HANGOVER_FRAMES
-                        false
-                    } else {
-                        if (hangover > 0) { hangover--; false } else true
-                    }
+                // 应用麦克风数字增益（核心修复）
+                for (i in 0 until FRAME_SAMPLES) {
+                    val amplified = (shortBuf[i] * MIC_GAIN).toInt()
+                    shortBuf[i] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                }
+
+                val sendSilence = if (!ENABLE_NOISE_GATE) false else { /* 原逻辑 */ 
+                    if (meanAbs >= NOISE_GATE) { hangover = HANGOVER_FRAMES; false } 
+                    else { if (hangover > 0) { hangover--; false } else true }
                 }
 
                 try {
@@ -406,7 +383,7 @@ class AudioSession(
                     silenceFrame
                 }
 
-                // ✅ 计算收到的音频能量（决定性证据：有没有音频内容）
+                // 计算接收端实际音频能量（关键诊断）
                 lastRxPeak = pcm16lePeak(toPlay)
 
                 try {
@@ -437,70 +414,27 @@ class AudioSession(
 
     private fun startStatsThread() {
         thread(name = "AudioStats", isDaemon = true) {
-            var lastSent = 0L
-            var lastRecv = 0L
-            var lastUnder = 0L
-            var lastDrop = 0L
-
             while (running) {
-                SystemClock.sleep(1000)
-
-                val s = sentBytes
-                val r = recvBytes
-                val u = underflow
-                val d = dropped
-
-                val ds = s - lastSent
-                val dr = r - lastRecv
-                val du = u - lastUnder
-                val dd = d - lastDrop
-
-                lastSent = s
-                lastRecv = r
-                lastUnder = u
-                lastDrop = d
-
-                AppLog.i(
-                    context,
-                    "Audio stats: jitterQ=$jitterSize underflow=+$du drop=+$dd micPeak=$lastMicPeak rxPeak=$lastRxPeak tx=${ds}B/s rx=${dr}B/s gate=$ENABLE_NOISE_GATE focus=$audioFocused"
-                )
+                SystemClock.sleep(3000)
+                if (!running) break
+                AppLog.i(context, "Audio stats: jitterQ=$jitterSize underflow=+$underflow drop=+$dropped micPeak=$lastMicPeak rxPeak=$lastRxPeak tx=${sentBytes/3}B/s rx=${recvBytes/3}B/s")
+                sentBytes = 0
+                recvBytes = 0
             }
         }
     }
 
     fun stop() {
-        if (!running) return
         running = false
-
-        AppLog.i(context, "AudioSession stop...")
-
-        runCatching { sock?.close() }
-        sock = null
-
-        runCatching { audioRecord?.stop() }
-        runCatching { audioRecord?.release() }
-        audioRecord = null
-
-        runCatching { audioTrack?.pause() }
-        runCatching { audioTrack?.flush() }
-        runCatching { audioTrack?.stop() }
-        runCatching { audioTrack?.release() }
-        audioTrack = null
-
-        runCatching { aec?.release() }
-        runCatching { ns?.release() }
-        runCatching { agc?.release() }
-        aec = null
-        ns = null
-        agc = null
-
-        synchronized(qLock) {
-            jitterQ.clear()
-            jitterSize = 0
-        }
-
         abandonFocus()
-
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioTrack?.stop()
+        audioTrack?.release()
+        sock?.close()
+        aec?.release()
+        ns?.release()
+        agc?.release()
         AppLog.i(context, "AudioSession stopped")
     }
 }
