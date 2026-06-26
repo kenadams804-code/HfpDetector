@@ -3,7 +3,6 @@ package com.example.hfpdetector
 import android.Manifest
 import android.app.Activity
 import android.app.KeyguardManager
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -28,6 +27,7 @@ import kotlin.random.Random
 class IncomingCallActivity : Activity() {
 
     private var inCall = false
+    private var accepting = false
 
     // 免提开关：true=扬声器免提，false=听筒/非免提
     private var speakerOn = true
@@ -155,16 +155,25 @@ class IncomingCallActivity : Activity() {
         updateSpeakerUi()
 
         btnLeft.setOnClickListener { if (inCall) hangup() else decline() }
-btnMid.setOnClickListener {
-    ...
-    speakerOn = !speakerOn
-    updateSpeakerUi()
-    applySpeakerRoute(speakerOn)
 
-    if (inCall) {
-        AudioCallService.setSpeaker(this, speakerOn)
+        btnMid.setOnClickListener {
+            val now = System.currentTimeMillis()
+            if (now - lastSpeakerToggleTs < 500) return@setOnClickListener
+            lastSpeakerToggleTs = now
+
+            speakerOn = !speakerOn
+            updateSpeakerUi()
+            applySpeakerRoute(speakerOn)
+
+            // ✅ 只有在通话中才通知 Service，避免“未接听就去折腾 Service”
+            if (inCall) {
+                AudioCallService.setSpeaker(this, speakerOn)
+            }
+        }
+
+        btnRight.setOnClickListener { accept() }
     }
-}
+
     private fun updateSpeakerUi() {
         // 你要求：开启时全红色，不开启时保持现在灰色
         val bg = if (speakerOn) "#D32F2F" else "#424242"
@@ -185,20 +194,38 @@ btnMid.setOnClickListener {
         }
 
     private fun accept() {
+        if (inCall) return
+        if (accepting) return
+        accepting = true
+
+        AppLog.i(this, "IncomingCallActivity：accept() clicked speakerOn=$speakerOn")
+
         if (Build.VERSION.SDK_INT >= 23 &&
             checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
         ) {
+            // ✅ 给用户/日志一个明确反馈，避免看起来像“没反应”
+            tvHint.text = "需要麦克风权限才能接听，正在请求授权…"
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 5001)
+            accepting = false
             return
         }
 
-        val invite = CallState.incoming ?: run { finish(); return }
+        val invite = CallState.incoming ?: run {
+            accepting = false
+            finish()
+            return
+        }
+
         val myAudioPort = Random.nextInt(46000, 46999)
 
         HistoryStore.updateCallState(this, invite.callId, "ANSWERED")
 
-        AudioCallService.setSpeaker(this, speakerOn)
+        // ✅ 先启动通话 Service（不要在 start 之前调用 setSpeaker）
         AudioCallService.start(this, invite.peerIp, invite.peerAudioPort, myAudioPort)
+
+        // 接听成功后，再同步一次 speaker 状态（仅用于你现有结构下尽量保持一致）
+        // 如果你后续把 AudioCallService 改成 startService()，这里会更稳
+        runCatching { AudioCallService.setSpeaker(this, speakerOn) }
 
         // ACCEPT 重发 x3
         sendControlX3(
@@ -221,10 +248,14 @@ btnMid.setOnClickListener {
         tvRight.text = "已接听"
         btnRight.isEnabled = false
         btnRight.alpha = 0.35f
+
+        accepting = false
     }
 
     private fun decline() {
         val invite = CallState.incoming ?: run { finish(); return }
+        AppLog.i(this, "IncomingCallActivity：decline callId=${invite.callId}")
+
         HistoryStore.updateCallState(this, invite.callId, "DECLINED")
 
         sendControlX3(
@@ -245,6 +276,7 @@ btnMid.setOnClickListener {
     private fun hangup() {
         val invite = CallState.incoming
         if (invite != null) {
+            AppLog.i(this, "IncomingCallActivity：hangup callId=${invite.callId}")
             HistoryStore.updateCallState(this, invite.callId, "ENDED")
 
             sendControlX3(
@@ -258,11 +290,12 @@ btnMid.setOnClickListener {
             )
         }
 
-        try { AudioCallService.stop(this) } catch (_: Throwable) {}
+        runCatching { AudioCallService.stop(this) }
         CallState.incoming = null
         finish()
     }
 
+    @Suppress("DEPRECATION")
     override fun onBackPressed() {
         if (inCall) hangup() else decline()
     }
@@ -274,7 +307,14 @@ btnMid.setOnClickListener {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 5001) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) accept()
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                AppLog.i(this, "IncomingCallActivity：RECORD_AUDIO granted")
+                accept()
+            } else {
+                AppLog.i(this, "IncomingCallActivity：RECORD_AUDIO denied")
+                tvHint.text = "未授予麦克风权限，无法接听"
+                accepting = false
+            }
         }
     }
 
