@@ -66,7 +66,7 @@ class AudioSession(
 
     // 增益调节
     private val MIC_GAIN = 5.0f      // 麦克风增益
-    private val RX_GAIN = 1.8f       // 播放端增益（提升整体响度）
+    private val RX_GAIN = 2.2f       // 播放端增益（提升整体响度）
 
     // audio focus
     private var audioFocusRequest: AudioFocusRequest? = null
