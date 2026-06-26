@@ -2,202 +2,390 @@ package com.example.hfpdetector
 
 import android.content.Context
 import android.media.*
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
+import android.os.Process
+import android.os.SystemClock
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.util.concurrent.ArrayDeque
+import java.net.InetSocketAddress
+import java.net.PortUnreachableException
+import java.net.SocketTimeoutException
+import java.util.ArrayDeque
 import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.math.max
 
-class AudioSession(private val context: Context) {
-
-    companion object {
-        private const val SAMPLE_RATE = 16000
-        private const val FRAME_MS = 20
-        private const val FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS / 1000
-        private const val FRAME_BYTES = FRAME_SAMPLES * 2
-
-        private const val MIC_GAIN = 9.0f
-        private const val RX_GAIN = 4.0f
-        private const val PREBUFFER = 8
-        private const val JITTER_MAX = 30
-    }
+class AudioSession(
+    private val context: Context,
+    private val peerIp: String,
+    private val peerAudioPort: Int,
+    private val myAudioPort: Int
+) {
+    @Volatile private var running = false
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
-    private var txSocket: DatagramSocket? = null
-    private var rxSocket: DatagramSocket? = null
+    private var sock: DatagramSocket? = null
 
-    @Volatile private var running = false
-    private var peerIp: InetAddress? = null
-    private var peerPort = 0
-    private var myPort = 0
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
+    private var agc: AutomaticGainControl? = null
 
-    private val jitterBuffer = ArrayDeque<ByteArray>()
-    private var lastRxPeak = 0
+    @Volatile private var sentBytes: Long = 0
+    @Volatile private var recvBytes: Long = 0
+    @Volatile private var lastMicPeak: Int = 0
+    @Volatile private var jitterSize: Int = 0
 
-    private var txThread: Thread? = null
-    private var rxThread: Thread? = null
-    private var playThread: Thread? = null
-    private var statsThread: Thread? = null
+    private val qLock = Any()
+    private val jitterQ = ArrayDeque<ByteArray>()
 
-    fun start(peer: String, peerAudioPort: Int, localPort: Int) {
+    private val FRAME_MS = 20
+    private val SAMPLE_RATE = 16000
+    private val FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS / 1000 // 320
+    private val FRAME_BYTES = FRAME_SAMPLES * 2               // 640
+
+    private val JITTER_MAX = 20
+    private val PREBUFFER = 5
+    private val CATCHUP_TARGET = 12
+
+    private val ENABLE_AEC = true
+    private val ENABLE_NS = false
+    private val ENABLE_AGC = false
+
+    // 先保持你原来的 gate（如怀疑门掉声音，可临时改成 false）
+    private val ENABLE_NOISE_GATE = true
+    private val NOISE_GATE = 220
+    private val HANGOVER_FRAMES = 10
+    private var hangover = 0
+
+    private val silenceFrame = ByteArray(FRAME_BYTES)
+
+    fun start() {
+        if (running) return
+        running = true
+
         try {
-            peerIp = InetAddress.getByName(peer)
-            peerPort = peerAudioPort
-            myPort = localPort
+            AppLog.i(context, "AudioSession start peer=$peerIp:$peerAudioPort myPort=$myAudioPort")
 
-            AppLog.i(this, "AudioSession start peer=$peer:$peerPort myPort=$myPort MIC_GAIN=$MIC_GAIN RX_GAIN=$RX_GAIN")
+            val am = context.getSystemService(AudioManager::class.java)
 
-            setupSockets()
-            setupAudioRecord()
-            setupAudioTrack()
+            runCatching {
+                am.mode = AudioManager.MODE_IN_COMMUNICATION
+                am.isSpeakerphoneOn = true
+                am.isMicrophoneMute = false
+            }
 
-            running = true
+            val inConfig = AudioFormat.CHANNEL_IN_MONO
+            val outConfig = AudioFormat.CHANNEL_OUT_MONO
+            val fmt = AudioFormat.ENCODING_PCM_16BIT
 
-            startTxThread()
+            val minIn = AudioRecord.getMinBufferSize(SAMPLE_RATE, inConfig, fmt)
+            val minOut = AudioTrack.getMinBufferSize(SAMPLE_RATE, outConfig, fmt)
+
+            val recBuf = max(minIn, 4096)
+            val playBuf = max(minOut, 4096)
+
+            audioRecord = runCatching {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    SAMPLE_RATE, inConfig, fmt,
+                    recBuf * 2
+                )
+            }.getOrNull()
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                audioRecord = runCatching {
+                    AudioRecord(
+                        MediaRecorder.AudioSource.MIC,
+                        SAMPLE_RATE, inConfig, fmt,
+                        recBuf * 2
+                    )
+                }.getOrNull()
+            }
+
+            val rec = audioRecord
+            if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
+                AppLog.i(context, "AudioSession AudioRecord init FAILED")
+                stop(); return
+            }
+
+            val sid = rec.audioSessionId
+            runCatching {
+                if (ENABLE_AEC && AcousticEchoCanceler.isAvailable()) {
+                    aec = AcousticEchoCanceler.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession AEC enabled=${aec?.enabled}")
+                }
+            }
+            runCatching {
+                if (ENABLE_NS && NoiseSuppressor.isAvailable()) {
+                    ns = NoiseSuppressor.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession NS enabled=${ns?.enabled}")
+                }
+            }
+            runCatching {
+                if (ENABLE_AGC && AutomaticGainControl.isAvailable()) {
+                    agc = AutomaticGainControl.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession AGC enabled=${agc?.enabled}")
+                }
+            }
+
+            val attr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+
+            val af = AudioFormat.Builder()
+                .setEncoding(fmt)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(outConfig)
+                .build()
+
+            audioTrack = AudioTrack(
+                attr, af,
+                playBuf * 2,
+                AudioTrack.MODE_STREAM,
+                AudioManager.AUDIO_SESSION_ID_GENERATE
+            )
+
+            val tr = audioTrack
+            if (tr == null || tr.state != AudioTrack.STATE_INITIALIZED) {
+                AppLog.i(context, "AudioSession AudioTrack init FAILED")
+                stop(); return
+            }
+
+            sock = DatagramSocket(null).apply {
+                reuseAddress = true
+                soTimeout = 300
+                bind(InetSocketAddress(myAudioPort))
+                runCatching { receiveBufferSize = 1 shl 20 }
+                runCatching { sendBufferSize = 1 shl 20 }
+            }
+
+            rec.startRecording()
+            tr.play()
+
             startRxThread()
+            startTxThread()
             startPlayoutThread()
             startStatsThread()
 
-            AppLog.i(this, "AudioSession started successfully")
-        } catch (e: Exception) {
-            AppLog.i(this, "AudioSession start failed: ${e.message}")
-        }
-    }
+            AppLog.i(context, "AudioSession started")
 
-    private fun setupSockets() {
-        txSocket = DatagramSocket().apply { reuseAddress = true }
-        rxSocket = DatagramSocket(myPort).apply { reuseAddress = true }
-    }
-
-    private fun setupAudioRecord() {
-        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            max(minBuf * 2, FRAME_BYTES * 4)
-        )
-        audioRecord?.startRecording()
-    }
-
-    private fun setupAudioTrack() {
-        val attrs = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build()
-
-        val format = AudioFormat.Builder()
-            .setSampleRate(SAMPLE_RATE)
-            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .build()
-
-        val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-
-        audioTrack = AudioTrack(attrs, format, max(minBuf * 4, FRAME_BYTES * 8),
-            AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE).apply { play() }
-
-        try {
-            val am = context.getSystemService(AudioManager::class.java)
-            val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-            am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, (maxVol * 0.9).toInt(), 0)
-        } catch (_: Exception) {}
-    }
-
-    private fun startTxThread() {
-        txThread = thread(name = "AudioTx") {
-            val buffer = ShortArray(FRAME_SAMPLES)
-            val byteBuffer = ByteArray(FRAME_BYTES)
-
-            while (running) {
-                try {
-                    val read = audioRecord?.read(buffer, 0, FRAME_SAMPLES) ?: 0
-                    if (read > 0) {
-                        for (i in 0 until read) {
-                            val amp = (buffer[i] * MIC_GAIN).toInt()
-                            buffer[i] = amp.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                        }
-                        for (i in 0 until read) {
-                            byteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
-                            byteBuffer[i * 2 + 1] = ((buffer[i].toInt() shr 8) and 0xFF).toByte()
-                        }
-                        txSocket?.send(DatagramPacket(byteBuffer, read * 2, peerIp, peerPort))
-                    }
-                } catch (_: Exception) {}
-            }
+        } catch (t: Throwable) {
+            AppLog.i(context, "AudioSession start exception: ${t.javaClass.simpleName} ${t.message}")
+            stop()
         }
     }
 
     private fun startRxThread() {
-        rxThread = thread(name = "AudioRx") {
-            val buf = ByteArray(FRAME_BYTES * 2)
+        val s = sock ?: return
+        thread(name = "AudioRx", isDaemon = true) {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+
+            val buf = ByteArray(2048)
+            val pkt = DatagramPacket(buf, buf.size)
+
             while (running) {
                 try {
-                    val p = DatagramPacket(buf, buf.size)
-                    rxSocket?.receive(p) ?: continue
-                    if (p.length == FRAME_BYTES) {
-                        val data = buf.copyOf(FRAME_BYTES)
-                        synchronized(jitterBuffer) {
-                            if (jitterBuffer.size >= JITTER_MAX) jitterBuffer.removeFirst()
-                            jitterBuffer.addLast(data)
-                        }
+                    s.receive(pkt)
+                    val len = pkt.length
+                    if (len <= 0) continue
+
+                    val frame = ByteArray(FRAME_BYTES)
+                    if (len >= FRAME_BYTES) {
+                        System.arraycopy(buf, 0, frame, 0, FRAME_BYTES)
+                    } else {
+                        System.arraycopy(buf, 0, frame, 0, len)
                     }
-                } catch (_: Exception) {}
+
+                    recvBytes += minOf(len, FRAME_BYTES).toLong()
+
+                    synchronized(qLock) {
+                        while (jitterQ.size >= JITTER_MAX) jitterQ.removeFirst()
+                        jitterQ.addLast(frame)
+                        jitterSize = jitterQ.size
+                    }
+                } catch (_: SocketTimeoutException) {
+                } catch (_: PortUnreachableException) {
+                } catch (t: Throwable) {
+                    if (running) AppLog.i(context, "AudioRx exception: ${t.javaClass.simpleName} ${t.message}")
+                }
+            }
+        }
+    }
+
+    private fun startTxThread() {
+        val s = sock ?: return
+        val peerAddr = InetAddress.getByName(peerIp)
+
+        thread(name = "AudioTx", isDaemon = true) {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+
+            val rec = audioRecord ?: return@thread
+            val shortBuf = ShortArray(FRAME_SAMPLES)
+            val outBytes = ByteArray(FRAME_BYTES)
+
+            val pktVoice = DatagramPacket(outBytes, outBytes.size, peerAddr, peerAudioPort)
+            val pktSilence = DatagramPacket(silenceFrame, silenceFrame.size, peerAddr, peerAudioPort)
+
+            while (running) {
+                // 读满一帧（减少断续）
+                var got = 0
+                while (running && got < FRAME_SAMPLES) {
+                    val n = try {
+                        if (Build.VERSION.SDK_INT >= 23) {
+                            rec.read(shortBuf, got, FRAME_SAMPLES - got, AudioRecord.READ_BLOCKING)
+                        } else {
+                            rec.read(shortBuf, got, FRAME_SAMPLES - got)
+                        }
+                    } catch (t: Throwable) {
+                        if (running) AppLog.i(context, "AudioTx read exception: ${t.message}")
+                        -1
+                    }
+                    if (n <= 0) break
+                    got += n
+                }
+
+                if (got <= 0) {
+                    SystemClock.sleep(5)
+                    continue
+                }
+                for (i in got until FRAME_SAMPLES) shortBuf[i] = 0
+
+                // micPeak
+                var peak = 0
+                for (i in 0 until FRAME_SAMPLES) {
+                    val a = abs(shortBuf[i].toInt())
+                    if (a > peak) peak = a
+                }
+                lastMicPeak = peak
+
+                val sendSilence = if (!ENABLE_NOISE_GATE) {
+                    false
+                } else {
+                    if (peak >= NOISE_GATE) {
+                        hangover = HANGOVER_FRAMES
+                        false
+                    } else {
+                        if (hangover > 0) { hangover--; false } else true
+                    }
+                }
+
+                try {
+                    if (sendSilence) {
+                        s.send(pktSilence)
+                        sentBytes += silenceFrame.size.toLong()
+                        continue
+                    }
+
+                    var bi = 0
+                    for (i in 0 until FRAME_SAMPLES) {
+                        val v = shortBuf[i].toInt()
+                        outBytes[bi++] = (v and 0xFF).toByte()
+                        outBytes[bi++] = ((v shr 8) and 0xFF).toByte()
+                    }
+
+                    s.send(pktVoice)
+                    sentBytes += outBytes.size.toLong()
+                } catch (t: Throwable) {
+                    if (running) AppLog.i(context, "AudioTx send exception: ${t.javaClass.simpleName} ${t.message}")
+                }
             }
         }
     }
 
     private fun startPlayoutThread() {
-        playThread = thread(name = "AudioPlayout") {
-            val shortBuf = ShortArray(FRAME_SAMPLES)
+        thread(name = "AudioPlayout", isDaemon = true) {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+            val tr = audioTrack ?: return@thread
+
+            val waitUntil = SystemClock.elapsedRealtime() + 800
             while (running) {
-                val toPlay = synchronized(jitterBuffer) {
-                    if (jitterBuffer.size >= PREBUFFER) jitterBuffer.removeFirst() else null
+                val ok = synchronized(qLock) { jitterQ.size >= PREBUFFER }
+                if (ok) break
+                if (SystemClock.elapsedRealtime() > waitUntil) break
+                SystemClock.sleep(5)
+            }
+
+            val t0 = SystemClock.elapsedRealtime()
+            var frameIdx = 0L
+
+            while (running) {
+                val targetTs = t0 + frameIdx * FRAME_MS
+                val now = SystemClock.elapsedRealtime()
+                val sleepMs = targetTs - now
+                if (sleepMs > 0) SystemClock.sleep(sleepMs)
+
+                val frame: ByteArray? = synchronized(qLock) {
+                    while (jitterQ.size > CATCHUP_TARGET) jitterQ.removeFirst()
+                    jitterSize = jitterQ.size
+                    if (jitterQ.isNotEmpty()) jitterQ.removeFirst() else null
                 }
-                if (toPlay != null) {
-                    for (i in 0 until FRAME_SAMPLES) {
-                        val s = ((toPlay[i * 2].toInt() and 0xFF) or ((toPlay[i * 2 + 1].toInt() and 0xFF) shl 8)).toShort()
-                        shortBuf[i] = (s * RX_GAIN).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                    }
-                    lastRxPeak = pcm16lePeak(shortBuf)
-                    audioTrack?.write(shortBuf, 0, FRAME_SAMPLES)
-                } else {
-                    Thread.sleep(5)
+
+                val toPlay = frame ?: silenceFrame
+                try {
+                    tr.write(toPlay, 0, toPlay.size)
+                } catch (t: Throwable) {
+                    if (running) AppLog.i(context, "AudioPlayout write exception: ${t.message}")
                 }
+
+                frameIdx++
             }
         }
     }
 
     private fun startStatsThread() {
-        statsThread = thread(name = "AudioStats") {
+        thread(name = "AudioStats", isDaemon = true) {
+            var lastSent = 0L
+            var lastRecv = 0L
             while (running) {
-                Thread.sleep(1000)
-                val jitterSize = synchronized(jitterBuffer) { jitterBuffer.size }
-                AppLog.i(this, "Audio stats: jitterQ=$jitterSize rxPeak=$lastRxPeak")
+                SystemClock.sleep(1000)
+                val s = sentBytes
+                val r = recvBytes
+                val ds = s - lastSent
+                val dr = r - lastRecv
+                lastSent = s
+                lastRecv = r
+                AppLog.i(context, "Audio stats: jitterQ=$jitterSize micPeak=$lastMicPeak tx=${ds}B/s rx=${dr}B/s")
             }
         }
     }
 
     fun stop() {
+        if (!running) return
         running = false
-        listOf(txThread, rxThread, playThread, statsThread).forEach { it?.interrupt() }
 
-        audioRecord?.stop(); audioRecord?.release()
-        audioTrack?.stop(); audioTrack?.release()
-        txSocket?.close(); rxSocket?.close()
+        AppLog.i(context, "AudioSession stop...")
 
-        jitterBuffer.clear()
-        AppLog.i(this, "AudioSession stopped")
-    }
+        runCatching { sock?.close() }
+        sock = null
 
-    private fun pcm16lePeak(buf: ShortArray): Int {
-        var max = 0
-        for (s in buf) max = max(max, abs(s.toInt()))
-        return max
+        runCatching { audioRecord?.stop() }
+        runCatching { audioRecord?.release() }
+        audioRecord = null
+
+        runCatching { audioTrack?.pause() }
+        runCatching { audioTrack?.flush() }
+        runCatching { audioTrack?.stop() }
+        runCatching { audioTrack?.release() }
+        audioTrack = null
+
+        runCatching { aec?.release() }
+        runCatching { ns?.release() }
+        runCatching { agc?.release() }
+        aec = null
+        ns = null
+        agc = null
+
+        synchronized(qLock) {
+            jitterQ.clear()
+            jitterSize = 0
+        }
+
+        AppLog.i(context, "AudioSession stopped")
     }
 }
