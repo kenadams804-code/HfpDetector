@@ -339,7 +339,7 @@ class CoreService : Service() {
         }
     }
 
-        private fun onControlMessage(msg: String, fromIp: InetAddress, fromPort: Int) {
+            private fun onControlMessage(msg: String, fromIp: InetAddress, fromPort: Int) {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
 
         when (obj.optString("type")) {
@@ -385,6 +385,7 @@ class CoreService : Service() {
                     peerAudioPort = senderAudioPort
                 )
 
+                // 记录通话记录（IN）
                 HistoryStore.upsertCall(this, cid, "IN", number, fromIp.hostAddress, isTest, "RINGING")
 
                 AppLog.i(this, "接听端：收到 INVITE number=$number test=$isTest from=$fromIp")
@@ -395,6 +396,7 @@ class CoreService : Service() {
 
             "INVITE_ACK" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
+                AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
             "ACCEPT" -> {
@@ -409,7 +411,9 @@ class CoreService : Service() {
 
                 AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
 
-                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
+                if (cid.isNotBlank()) {
+                    HistoryStore.updateCallState(this, cid, "ANSWERED")
+                }
 
                 // 关键：真正接起运营商电话
                 pstnAnswerIfPossible()
@@ -420,6 +424,40 @@ class CoreService : Service() {
                     AppLog.i(this, "有卡端：已启动 AudioCallService localPort=$localPort peerAudioPort=$peerAudioPort")
                 }
             }
+
+            "DECLINE", "HANGUP" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val cid = obj.optString("callId", "")
+
+                if (cid.isNotBlank()) {
+                    acceptedCallIds.remove(cid)
+                    audioPortByCallId.remove(cid)
+                    val newState = if (obj.optString("type") == "HANGUP") "ENDED" else "DECLINED"
+                    HistoryStore.updateCallState(this, cid, newState)
+                }
+
+                AppLog.i(this, "收到 ${obj.optString("type")} <- ${fromIp.hostAddress} callId=$cid，停止对讲 + 挂断PSTN")
+
+                pstnEndIfPossible(obj.optString("type"))
+
+                try { AudioCallService.stop(this) } catch (_: Throwable) {}
+                currentCallId = null
+            }
+
+            "SMS" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val msgId = obj.optString("msgId", UUID.randomUUID().toString())
+                val address = obj.optString("address", "未知号码")
+                val body = obj.optString("body", "")
+                val ts = obj.optLong("ts", System.currentTimeMillis())
+
+                HistoryStore.insertSmsIn(this, msgId, address, body, fromIp.hostAddress, ts)
+                showSmsNotification(address, body)
+
+                AppLog.i(this, "收到 SMS <- ${fromIp.hostAddress} from=$address")
+            }
+        }
+    }
 
             "DECLINE", "HANGUP" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
