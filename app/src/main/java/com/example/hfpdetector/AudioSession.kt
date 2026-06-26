@@ -64,7 +64,7 @@ class AudioSession(
     private val ENABLE_AGC = false
 
     // noise gate（先别太激进）
-    private val NOISE_GATE = 180
+    private val NOISE_GATE = 120
     private val HANGOVER_FRAMES = 10
     private var hangover = 0
     private val silenceFrame = ByteArray(FRAME_BYTES)
