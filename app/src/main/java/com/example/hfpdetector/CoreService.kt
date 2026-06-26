@@ -339,7 +339,7 @@ class CoreService : Service() {
         }
     }
 
-    private fun onControlMessage(msg: String, fromIp: InetAddress, fromPort: Int) {
+        private fun onControlMessage(msg: String, fromIp: InetAddress, fromPort: Int) {
         val obj = try { JSONObject(msg) } catch (_: Throwable) { return }
 
         when (obj.optString("type")) {
@@ -359,11 +359,6 @@ class CoreService : Service() {
 
             "PONG" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
-                val now = System.currentTimeMillis()
-                if (now - lastPongLogTs > 10_000) {
-                    lastPongLogTs = now
-                    AppLog.i(this, "有卡端：收到 PONG <- ${fromIp.hostAddress}")
-                }
             }
 
             "INVITE" -> {
@@ -400,7 +395,6 @@ class CoreService : Service() {
 
             "INVITE_ACK" -> {
                 Prefs.markPeerSeen(this, fromIp.hostAddress)
-                AppLog.i(this, "有卡端：收到 INVITE_ACK <- ${fromIp.hostAddress} callId=${obj.optString("callId")}")
             }
 
             "ACCEPT" -> {
@@ -408,37 +402,55 @@ class CoreService : Service() {
                 val cid = obj.optString("callId", "")
                 val peerAudioPort = obj.optInt("audioPort", 0)
 
-                // ✅ 去重：ACCEPT x3 只处理一次，避免重复启动 AudioSession 导致嗡鸣/爆音
                 if (cid.isNotBlank() && acceptedCallIds.putIfAbsent(cid, true) != null) {
-                AppLog.i(this, "有卡端：收到重复 ACCEPT，已忽略 callId=$cid")
-                return
-                }
-                
-                if (cid.isBlank()) {
-                AppLog.i(this, "有卡端：收到 ACCEPT 但 callId 为空，忽略")
-                return
+                    AppLog.i(this, "有卡端：收到重复 ACCEPT，已忽略 callId=$cid")
+                    return
                 }
 
-               AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
-               if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
+                AppLog.i(this, "有卡端：收到 ACCEPT <- ${fromIp.hostAddress} callId=$cid peerAudioPort=$peerAudioPort")
 
-               // ✅ 只有真的有运营商来电在响时才执行接听（避免测试INVITE也去动PSTN）
-               pstnAnswerIfPossible()
+                if (cid.isNotBlank()) HistoryStore.updateCallState(this, cid, "ANSWERED")
 
-              val localPort = audioPortByCallId[cid] ?: myAudioPort
-              if (peerAudioPort <= 0 || localPort <= 0) {
-              AppLog.i(this, "有卡端：音频端口异常 localPort=$localPort peerAudioPort=$peerAudioPort")
-              return
-              }
+                // 关键：真正接起运营商电话
+                pstnAnswerIfPossible()
 
-             try {
-                 AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, localPort)
-                 AppLog.i(this, "有卡端：已启动 AudioCallService localPort=$localPort peerAudioPort=$peerAudioPort")
-             } catch (t: Throwable) {
-                 AppLog.i(this, "有卡端：启动 AudioCallService 失败：${t.javaClass.simpleName} ${t.message}")
-             }
-           }
+                val localPort = audioPortByCallId[cid] ?: myAudioPort
+                if (peerAudioPort > 0 && localPort > 0) {
+                    AudioCallService.start(this, fromIp.hostAddress, peerAudioPort, localPort)
+                    AppLog.i(this, "有卡端：已启动 AudioCallService localPort=$localPort peerAudioPort=$peerAudioPort")
+                }
+            }
 
+            "DECLINE", "HANGUP" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val cid = obj.optString("callId", "")
+
+                if (cid.isNotBlank()) {
+                    acceptedCallIds.remove(cid)
+                    audioPortByCallId.remove(cid)
+                    HistoryStore.updateCallState(this, cid, if (obj.optString("type") == "HANGUP") "ENDED" else "DECLINED")
+                }
+
+                AppLog.i(this, "收到 ${obj.optString("type")} <- ${fromIp.hostAddress} callId=$cid，停止对讲 + 挂断PSTN")
+
+                pstnEndIfPossible(obj.optString("type"))
+
+                try { AudioCallService.stop(this) } catch (_: Throwable) {}
+                currentCallId = null
+            }
+
+            "SMS" -> {
+                Prefs.markPeerSeen(this, fromIp.hostAddress)
+                val msgId = obj.optString("msgId", UUID.randomUUID().toString())
+                val address = obj.optString("address", "未知号码")
+                val body = obj.optString("body", "")
+                val ts = obj.optLong("ts", System.currentTimeMillis())
+
+                HistoryStore.insertSmsIn(this, msgId, address, body, fromIp.hostAddress, ts)
+                showSmsNotification(address, body)
+            }
+        }
+    }
              "DECLINE" -> {
                  Prefs.markPeerSeen(this, fromIp.hostAddress)
                  val cid = obj.optString("callId", "")
