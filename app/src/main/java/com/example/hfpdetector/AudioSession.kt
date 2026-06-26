@@ -44,7 +44,7 @@ class AudioSession(
     private val qLock = Any()
     private val jitterQ = ArrayDeque<ByteArray>()
     private val JITTER_MAX = 25
-    private val PREBUFFER = 8          // 增加预缓冲，减少断续
+    private val PREBUFFER = 10          // 增加预缓冲，减少断续
     private val CATCHUP_TARGET = 15
 
     // stats
