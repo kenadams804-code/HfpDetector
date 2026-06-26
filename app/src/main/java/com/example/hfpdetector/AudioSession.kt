@@ -1,3 +1,17 @@
+下面把 **AudioSession.kt** 从你截断的位置开始写完，并且我直接给你一份**完整可替换的整文件**（避免你拼接出错）。这个版本包含：
+
+- **AEC 开启**（抑制回授）
+- **默认关闭 NS/AGC**（减少“风声/吹气伪影”）
+- **Noise Gate（噪声门限 + hangover）**（把小幅度风噪发成静音帧）
+- **Jitter Buffer（入队 + 播放端用“对齐时钟”的方式取帧）**，并且当队列太大时会**丢帧追赶**，避免延迟越积越大导致“恶心/眩晕”
+- stats 日志：`jitterQ`、`micPeak`
+
+---
+
+## 整文件替换：AudioSession.kt
+路径：`app/src/main/java/com/example/hfpdetector/AudioSession.kt`
+
+```kotlin
 package com.example.hfpdetector
 
 import android.content.Context
@@ -7,6 +21,7 @@ import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -42,19 +57,22 @@ class AudioSession(
     private val qLock = Any()
     private val jitterQ = ArrayDeque<ByteArray>()
 
+    private val FRAME_MS = 20
     private val SAMPLE_RATE = 16000
     private val FRAME_BYTES = 640 // 20ms @16kHz mono 16bit
+
     private val JITTER_MAX = 10   // 最大缓存帧数（≈200ms）
     private val PREBUFFER = 3     // 预缓冲帧数（≈60ms）
+    private val CATCHUP_TARGET = 5 // 队列超过这个值就丢帧追赶，避免延迟堆积
 
-    // ✅ 减少“风声/水声伪影”：只开 AEC，先关 NS/AGC
+    // ✅ 减少“风声/水声伪影”：只开 AEC，先关 NS/AGC（后续可做成设置项）
     private val ENABLE_AEC = true
     private val ENABLE_NS = false
     private val ENABLE_AGC = false
 
-    // ✅ 噪声门限：低于门限视作噪声，发静音帧（减少风噪）
-    private val NOISE_GATE = 220          // 你可以在 120~400 之间调
-    private val HANGOVER_FRAMES = 10      // 200ms 余留，避免说话断断续续
+    // ✅ 噪声门限：低于门限视作噪声，发静音帧
+    private val NOISE_GATE = 220          // 可在 120~400 之间调
+    private val HANGOVER_FRAMES = 10      // 200ms 余留，避免说话断续
     private var hangover = 0
 
     fun start() {
@@ -72,7 +90,7 @@ class AudioSession(
                 am.isMicrophoneMute = false
                 AppLog.i(context, "AudioSession：isMicrophoneMute=${am.isMicrophoneMute}")
 
-                // 音量不要太大（太大更容易回授、恶心）
+                // 音量不要太大（太大更容易回授、不舒服）
                 val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
                 val target = (maxVol * 0.40f).toInt().coerceAtLeast(1)
                 am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, target, 0)
@@ -133,4 +151,34 @@ class AudioSession(
                 if (ENABLE_AEC && AcousticEchoCanceler.isAvailable()) {
                     aec = AcousticEchoCanceler.create(sid)?.apply { enabled = true }
                     AppLog.i(context, "AudioSession：AEC enabled=${aec?.enabled}")
-                } else AppLog.i(context, "AudioSession：AEC disabled
+                } else {
+                    AppLog.i(context, "AudioSession：AEC disabled/unavailable")
+                }
+            }
+
+            runCatching {
+                if (ENABLE_NS && NoiseSuppressor.isAvailable()) {
+                    ns = NoiseSuppressor.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession：NS enabled=${ns?.enabled}")
+                } else {
+                    AppLog.i(context, "AudioSession：NS disabled/unavailable")
+                }
+            }
+
+            runCatching {
+                if (ENABLE_AGC && AutomaticGainControl.isAvailable()) {
+                    agc = AutomaticGainControl.create(sid)?.apply { enabled = true }
+                    AppLog.i(context, "AudioSession：AGC enabled=${agc?.enabled}")
+                } else {
+                    AppLog.i(context, "AudioSession：AGC disabled/unavailable")
+                }
+            }
+
+            val attr = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+
+            val af = AudioFormat.Builder()
+                .setEncoding(fmt)
+                .setSampleRate(SAMPLE_RATE
