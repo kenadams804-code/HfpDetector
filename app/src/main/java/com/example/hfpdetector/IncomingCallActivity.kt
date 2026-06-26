@@ -52,6 +52,7 @@ class IncomingCallActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             @Suppress("DEPRECATION")
             window.addFlags(
@@ -133,7 +134,7 @@ class IncomingCallActivity : Activity() {
 
         // 中间免提按钮：颜色由 updateSpeakerUi() 控制
         btnMid = circleButton("#424242", android.R.drawable.ic_btn_speak_now)
-        tvMid = label("") // 先空，下面 updateSpeakerUi() 会填
+        tvMid = label("")
         midCol.addView(btnMid); midCol.addView(tvMid)
 
         btnRight = circleButton("#2E7D32", android.R.drawable.sym_action_call)
@@ -165,9 +166,9 @@ class IncomingCallActivity : Activity() {
             updateSpeakerUi()
             applySpeakerRoute(speakerOn)
 
-            // ✅ 只有在通话中才通知 Service，避免“未接听就去折腾 Service”
+            // ✅ 只有在通话中才通知 Service
             if (inCall) {
-                AudioCallService.setSpeaker(this, speakerOn)
+                runCatching { AudioCallService.setSpeaker(this, speakerOn) }
             }
         }
 
@@ -175,7 +176,6 @@ class IncomingCallActivity : Activity() {
     }
 
     private fun updateSpeakerUi() {
-        // 你要求：开启时全红色，不开启时保持现在灰色
         val bg = if (speakerOn) "#D32F2F" else "#424242"
         btnMid.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
@@ -194,62 +194,79 @@ class IncomingCallActivity : Activity() {
         }
 
     private fun accept() {
-        if (inCall) return
-        if (accepting) return
+        if (inCall || accepting) return
         accepting = true
 
-        AppLog.i(this, "IncomingCallActivity：accept() clicked speakerOn=$speakerOn")
-
-        if (Build.VERSION.SDK_INT >= 23 &&
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
-        ) {
-            // ✅ 给用户/日志一个明确反馈，避免看起来像“没反应”
-            tvHint.text = "需要麦克风权限才能接听，正在请求授权…"
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 5001)
-            accepting = false
-            return
-        }
-
-        val invite = CallState.incoming ?: run {
-            accepting = false
-            finish()
-            return
-        }
-
-        val myAudioPort = Random.nextInt(46000, 46999)
-
-        HistoryStore.updateCallState(this, invite.callId, "ANSWERED")
-
-        // ✅ 先启动通话 Service（不要在 start 之前调用 setSpeaker）
-        AudioCallService.start(this, invite.peerIp, invite.peerAudioPort, myAudioPort)
-
-        // 接听成功后，再同步一次 speaker 状态（仅用于你现有结构下尽量保持一致）
-        // 如果你后续把 AudioCallService 改成 startService()，这里会更稳
-        runCatching { AudioCallService.setSpeaker(this, speakerOn) }
-
-        // ACCEPT 重发 x3
-        sendControlX3(
-            ip = invite.peerIp,
-            port = invite.peerControlPort,
-            json = JSONObject()
-                .put("type", "ACCEPT")
-                .put("callId", invite.callId)
-                .put("audioPort", myAudioPort)
-                .toString(),
-            tag = "ACCEPT"
-        )
-
-        CoreService.stopRingingNow(this)
-
-        inCall = true
-        tvTop.text = "通话中"
-        tvHint.text = "正在局域网对讲…（建议两机拉开距离/降低音量）"
-        tvLeft.text = "挂断"
-        tvRight.text = "已接听"
+        // UI 立刻反馈（避免连点）
         btnRight.isEnabled = false
         btnRight.alpha = 0.35f
 
-        accepting = false
+        try {
+            AppLog.i(this, "IncomingCallActivity：accept() clicked speakerOn=$speakerOn")
+
+            if (Build.VERSION.SDK_INT >= 23 &&
+                checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+            ) {
+                tvHint.text = "需要麦克风权限才能接听，正在请求授权…"
+                requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 5001)
+
+                // 等权限回调再接听，这里先恢复按钮
+                btnRight.isEnabled = true
+                btnRight.alpha = 1f
+                accepting = false
+                return
+            }
+
+            val invite = CallState.incoming ?: run {
+                accepting = false
+                finish()
+                return
+            }
+
+            val myAudioPort = Random.nextInt(46000, 46999)
+            HistoryStore.updateCallState(this, invite.callId, "ANSWERED")
+
+            // ✅ 直接调用 5 参数 start（与你 AudioCallService 完全匹配）
+            AudioCallService.start(
+                context = this,
+                peerIp = invite.peerIp,
+                peerAudioPort = invite.peerAudioPort,
+                myAudioPort = myAudioPort,
+                speakerOnInit = speakerOn
+            )
+
+            // ACCEPT 重发 x3
+            sendControlX3(
+                ip = invite.peerIp,
+                port = invite.peerControlPort,
+                json = JSONObject()
+                    .put("type", "ACCEPT")
+                    .put("callId", invite.callId)
+                    .put("audioPort", myAudioPort)
+                    .toString(),
+                tag = "ACCEPT"
+            )
+
+            CoreService.stopRingingNow(this)
+
+            inCall = true
+            tvTop.text = "通话中"
+            tvHint.text = "正在局域网对讲…（建议两机拉开距离/降低音量）"
+            tvLeft.text = "挂断"
+            tvRight.text = "已接听"
+            // btnRight 已禁用
+
+            accepting = false
+
+        } catch (t: Throwable) {
+            AppLog.i(this, "IncomingCallActivity：accept exception: ${t.javaClass.simpleName} ${t.message}")
+
+            // 失败恢复 UI
+            accepting = false
+            btnRight.isEnabled = true
+            btnRight.alpha = 1f
+            tvHint.text = "接听失败，请重试"
+        }
     }
 
     private fun decline() {
@@ -314,6 +331,8 @@ class IncomingCallActivity : Activity() {
                 AppLog.i(this, "IncomingCallActivity：RECORD_AUDIO denied")
                 tvHint.text = "未授予麦克风权限，无法接听"
                 accepting = false
+                btnRight.isEnabled = true
+                btnRight.alpha = 1f
             }
         }
     }
