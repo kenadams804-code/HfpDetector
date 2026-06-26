@@ -84,7 +84,9 @@ class AudioCallService : Service() {
                     applySpeakerRoute(speakerOn)
 
                     session?.stop()
-                    session = AudioSession(this, peerIp, peerAudioPort, myAudioPort).also { it.start() }
+                   session = AudioSession(this).also { 
+                       it.start(peerIp, peerAudioPort, myAudioPort) 
+                }
 
                     AppLog.i(this, "AudioCallService：AudioSession 已启动 my=$myAudioPort peer=$peerAudioPort speakerOn=$speakerOn")
                 }
